@@ -1,0 +1,17 @@
+{
+  "name": "social-downloader",
+  "version": "1.1.0",
+  "description": "微博 / 小红书 / 抖音 博主作品批量下载器（另支持单个作品下载），三平台相互独立",
+  "main": "src/main/main.js",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "test": "node tools/run-tests.js",
+    "test:list": "node test/single-download.test.js && node test/single-download-edge.test.js && node test/single-download-e2e.test.js && node test/platform-contract.test.js && node test/url-guard-coalesce.test.js && node test/downloader-host-backoff.test.js && node test/renderer-refs.test.js && node test/log-progress.test.js && node test/log-edge.test.js && node test/progress-edge.test.js && node test/renderer-smoke.test.js && node test/renderer-events.test.js && node test/feature-interaction.test.js",
+    "pack": "node tools/pack-asar.js",
+    "install-asar": "node tools/install-asar.js"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0"
+  }
+}

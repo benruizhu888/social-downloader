@@ -1,0 +1,234 @@
+{
+  "generatedAt": "2026-10-15T15:13:41.739Z",
+  "source": "D:\\17930\\social-downloader-src",
+  "output": "D:\\17930\\social-downloader-src-redacted",
+  "mode": "standard（标准：仅凭证 / 身份 / 本机信息）",
+  "excludedDirs": [
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    ".git",
+    ".svn",
+    ".hg",
+    ".venv",
+    "venv",
+    "env",
+    "virtualenv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    "site-packages",
+    ".gradle",
+    ".idea",
+    ".vscode",
+    ".next",
+    ".nuxt",
+    ".cache",
+    "coverage",
+    ".nyc_output",
+    ".tox",
+    "vendor",
+    "Pods",
+    "Carthage",
+    "DerivedData"
+  ],
+  "files": [
+    {
+      "path": "src/main/core/runner.js",
+      "replacements": 1,
+      "rules": [
+        {
+          "id": "R5",
+          "type": "小红书笔记 ID（真实格式 24 位十六进制）",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "path": "src/main/platforms/douyin.js",
+      "replacements": 1,
+      "rules": [
+        {
+          "id": "R2",
+          "type": "抖音用户身份标识 (sec_uid)",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "path": "src/main/platforms/xhs.js",
+      "replacements": 3,
+      "rules": [
+        {
+          "id": "R1",
+          "type": "小红书页面访问令牌 (xsec_token 值)",
+          "count": 1
+        },
+        {
+          "id": "R4",
+          "type": "小红书账号 ID（真实格式 24 位十六进制）",
+          "count": 1
+        },
+        {
+          "id": "R5",
+          "type": "小红书笔记 ID（真实格式 24 位十六进制）",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "path": "test/feature-interaction.test.js",
+      "replacements": 5,
+      "rules": [
+        {
+          "id": "R3",
+          "type": "微博账号 UID（10 位十进制数字）",
+          "count": 5
+        }
+      ]
+    },
+    {
+      "path": "test/lib/renderer-harness.js",
+      "replacements": 4,
+      "rules": [
+        {
+          "id": "R1",
+          "type": "小红书页面访问令牌 (xsec_token 值)",
+          "count": 1
+        },
+        {
+          "id": "R2",
+          "type": "抖音用户身份标识 (sec_uid)",
+          "count": 1
+        },
+        {
+          "id": "R4",
+          "type": "小红书账号 ID（真实格式 24 位十六进制）",
+          "count": 1
+        },
+        {
+          "id": "R5",
+          "type": "小红书笔记 ID（真实格式 24 位十六进制）",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "path": "test/log-progress.test.js",
+      "replacements": 1,
+      "rules": [
+        {
+          "id": "R3",
+          "type": "微博账号 UID（10 位十进制数字）",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "path": "test/platform-contract.test.js",
+      "replacements": 6,
+      "rules": [
+        {
+          "id": "R3",
+          "type": "微博账号 UID（10 位十进制数字）",
+          "count": 3
+        },
+        {
+          "id": "R5",
+          "type": "小红书笔记 ID（真实格式 24 位十六进制）",
+          "count": 3
+        }
+      ]
+    },
+    {
+      "path": "test/single-download-edge.test.js",
+      "replacements": 15,
+      "rules": [
+        {
+          "id": "R1",
+          "type": "小红书页面访问令牌 (xsec_token 值)",
+          "count": 1
+        },
+        {
+          "id": "R2",
+          "type": "抖音用户身份标识 (sec_uid)",
+          "count": 1
+        },
+        {
+          "id": "R3",
+          "type": "微博账号 UID（10 位十进制数字）",
+          "count": 8
+        },
+        {
+          "id": "R4",
+          "type": "小红书账号 ID（真实格式 24 位十六进制）",
+          "count": 1
+        },
+        {
+          "id": "R5",
+          "type": "小红书笔记 ID（真实格式 24 位十六进制）",
+          "count": 4
+        }
+      ]
+    },
+    {
+      "path": "test/single-download.test.js",
+      "replacements": 9,
+      "rules": [
+        {
+          "id": "R1",
+          "type": "小红书页面访问令牌 (xsec_token 值)",
+          "count": 2
+        },
+        {
+          "id": "R4",
+          "type": "小红书账号 ID（真实格式 24 位十六进制）",
+          "count": 2
+        },
+        {
+          "id": "R5",
+          "type": "小红书笔记 ID（真实格式 24 位十六进制）",
+          "count": 5
+        }
+      ]
+    },
+    {
+      "path": "tools/install-asar.js",
+      "replacements": 2,
+      "rules": [
+        {
+          "id": "R6b",
+          "type": "非标准盘符下的用户目录路径",
+          "count": 2
+        }
+      ]
+    }
+  ],
+  "binaries": [],
+  "skipped": [
+    {
+      "path": "dist/",
+      "reason": "排除目录"
+    },
+    {
+      "path": "node_modules/",
+      "reason": "排除目录"
+    }
+  ],
+  "ruleTotals": {
+    "R5": 15,
+    "R2": 3,
+    "R1": 5,
+    "R4": 5,
+    "R3": 17,
+    "R6b": 2
+  },
+  "stats": {
+    "files": 47,
+    "textFiles": 47,
+    "binaryFiles": 0,
+    "replaced": 47,
+    "changedFiles": 10
+  }
+}

@@ -1,0 +1,22 @@
+# 统一行尾：仓库内一律 LF，检出时按平台转换
+* text=auto eol=lf
+
+# 二进制资源不做任何转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.mp3 binary
+*.mp4 binary
+*.mov binary
+*.pdf binary
+*.zip binary
+*.asar binary
+*.exe binary
+*.dll binary
