@@ -7,6 +7,52 @@
 
 ---
 
+## 界面预览
+
+主界面走「一屏完成主路径」：左栏从粘贴链接到进度、日志自上而下，右栏是各平台的下载设置与当前平台信息。
+粘贴后自动识别链接类型，不需要手动切换模式。
+
+<p align="center">
+  <img src="docs/images/01-idle.png" alt="主界面（空闲）" width="900">
+</p>
+
+运行中会展开单文件细进度条，底部同时给出总进度、已用时间、剩余时间与速度：
+
+<p align="center">
+  <img src="docs/images/02-running.png" alt="运行中" width="900">
+</p>
+
+结束后进度区转为「完成」，失败项单独聚合成可复制的失败明细，日志按信息 / 成功 / 警告 / 错误分级计数：
+
+<p align="center">
+  <img src="docs/images/03-done.png" alt="任务完成" width="900">
+</p>
+
+识别与拦截是使用体验里最容易出错的一环，下面四种状态直接给出结论和下一步动作：
+
+| 单个作品识别 | 批量作品识别 |
+|---|---|
+| <img src="docs/images/04-single-item.png" alt="识别为单个作品" width="420"> | <img src="docs/images/05-batch-items.png" alt="识别为多个作品" width="420"> |
+| 只下载这一条，保存路径实时预览 | 逐条识别，可用条数与来源一并列出 |
+
+| 跨平台链接提醒 | 无效页面拦截 |
+|---|---|
+| <img src="docs/images/06-cross-platform.png" alt="跨平台链接提醒" width="420"> | <img src="docs/images/07-invalid-page.png" alt="无效页面拦截" width="420"> |
+| 平台不匹配时提示并可一键切换 | 抖音「精选 / 搜索」页会被拦下并说明原因 |
+
+窗口变窄时布局塌成单列，标签页下沉、右栏设置移到页面末尾：
+
+<p align="center">
+  <img src="docs/images/08-narrow.png" alt="窄窗口单列布局" width="420">
+</p>
+
+> 截图目录：**`docs/images/`**（8 张 PNG，共约 1.3 MB）。
+> 全部由 `docs/images` 同源的静态预览页在无头 Chromium 中按真实渲染结果截取，
+> 视口 1020×1400（窄窗口为 900×2100），裁掉多余画布留白后入库，
+> 因此与 `src/renderer/` 的实际界面一致，不含任何演示浮层或占位水印。
+
+---
+
 ## 功能
 
 | 功能 | 微博 | 小红书 | 抖音 |
@@ -63,7 +109,7 @@ npm run install-asar -- "C:/Path/To/YourApp/resources"
 - ✅ 可以跑 `npm test`（纯 Node，渲染层用内置的最小 DOM 测试替身）
 - ✅ 可以跑 `npm run pack` / `install-asar`
 - ❌ 无法直接 `electron .` 起窗口 —— 需要先有一个 electron-builder 打好的应用壳，
-   再用 `install-asar` 把 `app.asar` 换进去。
+  再用 `install-asar` 把 `app.asar` 换进去。
 
 ---
 
@@ -79,10 +125,12 @@ npm run install-asar -- "C:/Path/To/YourApp/resources"
 | `WEIBO_UID_PLACEHOLDER` | 微博账号 UID | **必须是 10 位纯数字** | 微博链接解析用例失败 |
 | `XHS_USER_ID_PLACEHOLDER` | 小红书账号 ID | **必须是 24 位十六进制** | 小红书主页链接解析用例失败 |
 | `XHS_NOTE_ID_PLACEHOLDER` | 小红书笔记 ID | **必须是 24 位十六进制** | 小红书作品链接解析用例失败 |
-| `LOCAL_USERNAME_PLACEHOLDER` | 本机用户名（出现在 `tools/install-asar.js` 默认安装路径里） | 替换为你的实际路径 | `install-asar` 默认目标指错地方（可运行时传参覆盖） |
 
 > 应用**运行期不需要**任何这些常量 —— 它们只出现在 UI 示例文案和测试夹具里。
 > 真实的用户 ID / token 全部在运行时从页面或用户粘贴的链接里取得。
+
+`tools/install-asar.js` 的默认安装目标是一个通用占位路径 `D:/Path/To/YourApp/resources`，
+**几乎总要传参覆盖**：`npm run install-asar -- "C:/Apps/YourApp/resources"`。
 
 ### 环境变量
 
@@ -112,13 +160,20 @@ npm run install-asar -- "C:/Path/To/YourApp/resources"
 
 要点：
 
+- 本次扫描源工程 **53 个文本文件**，命中 **10 个文件 / 47 处**，全部替换为语义化占位符。
 - 已扫描并确认**命中 0**：API Key / 密钥 / 数据库连接串 / 私钥 / `.env` / 邮箱 / 手机号 / UUID / Cookie 字面量。
-- 已替换：小红书 `xsec_token` 值、抖音 `sec_uid`、微博 UID、本机路径中的系统用户名。
+- 已替换：小红书 `xsec_token` 值、抖音 `sec_uid`、微博 UID、小红书账号与笔记 ID。
+- 自动规则之外另做了人工收尾：`tools/install-asar.js` 里硬编码的本机安装路径已改为通用占位，
+  本说明与报告自身的绝对路径也已去掉本机信息。
 - 刻意保留：平台公开域名（`weibo.com` / `douyin.com` / `xiaohongshu.com` 等）——
   它们是协议常量而非私密信息，替换会让解析与采集逻辑整体失效。
-  若需彻底脱敏（对外归档场景），执行 `node tools/desensitize.js --strict`，
+  若需彻底脱敏（对外归档场景），执行 `node tools/desensitize.js <源> <输出> --strict`，
   会额外把域名与全部业务 ID 也换成占位符。
 - Cookie 名（`ttwid` / `passport_csrf_token` / `SUBP` 等）是平台公开常量，代码中从未携带其值，予以保留。
+
+另用一套与脱敏器不同源的规则做了独立交叉扫描（AccessKey / GitHub Token / `sk-` 密钥 /
+Bearer / 私钥块 / 硬编码密码字段 / 本机用户路径 / 邮箱 / 手机号 / 身份证 / 内网 IP），
+均 **0 命中**；仅有的 31 条 ID 形态命中经逐条核对，全部是键盘顺序数字与顺排十六进制的人工样例。
 
 ### 测试
 
@@ -126,9 +181,16 @@ npm run install-asar -- "C:/Path/To/YourApp/resources"
 npm test
 ```
 
-在该脱敏副本上为 **238 / 251**（原工程 251 / 251）。
-未通过的 13 项全部由「占位符不满足 ID 字符形态」导致，属脱敏的预期代价；
-按上表回填为合法值后即可全绿。渲染层、日志、进度、限流、端到端用例均原样通过。
+| 副本 | 结果 |
+|---|---|
+| 原工程 | **268 / 268** 全部通过 |
+| 本脱敏副本 | **255 / 268** |
+
+未通过的 13 项全部集中在 3 个解析用例文件（`platform-contract` 2 项、
+`single-download-edge` 5 项、`single-download` 6 项），原因统一是
+「占位符不满足 ID 字符形态」（如 `WEIBO_UID_PLACEHOLDER` 不是 10 位纯数字）。
+这是脱敏的预期代价，不是代码缺陷；按上表回填为合法值后即可全绿。
+渲染层、日志、进度、限流、抖音输入守门与端到端用例均原样通过。
 
 ---
 
@@ -151,9 +213,13 @@ npm test
 ├── tools/
 │   ├── pack-asar.js           # 源码 → dist/app.asar
 │   ├── install-asar.js        # 装进已安装应用（自动备份）
+│   ├── inspect-input.js       # 离线排查：给一个链接看它会被解析成什么
 │   ├── desensitize.js         # 脱敏副本生成器
 │   └── run-tests.js           # 测试跑批
-└── docs/                      # 脱敏说明与报告
+└── docs/
+    ├── 脱敏说明.md             # 脱敏规则与逐文件明细
+    ├── 脱敏报告.json           # 机器可读的替换清单
+    └── images/                # README 界面截图（8 张 PNG）
 ```
 
 ---

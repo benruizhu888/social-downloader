@@ -2,203 +2,267 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
+<meta name="color-scheme" content="light" />
 <title>社交平台作品下载器</title>
 <!-- script-src 保持严格（禁止内联/外部脚本注入）；
-     style-src 必须放开 'unsafe-inline'：进度条宽度、按钮涟漪的位置都由 JS 动态计算，
-     这是「点击有明显反馈」所必需的，而渲染层只加载本地文件，不解析任何远端内容。 -->
+     style-src 放开 'unsafe-inline'：进度条宽度、涟漪位置由 JS 动态计算；
+     img-src 允许 data:：按钮图标用内联 SVG mask，不额外发请求。
+     渲染层只加载本地文件，不解析任何远端内容。 -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 <div class="app">
+
+  <!-- ===================== 顶栏：品牌 / 平台 / 登录态 ===================== -->
   <header class="topbar">
     <div class="brand">
-      <span class="logo">社</span>
+      <span class="logo" aria-hidden="true">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v11" /><path d="m6.5 9 5.5 5.5L17.5 9" /><path d="M5 20.5h14" />
+        </svg>
+      </span>
       <div>
         <h1>作品下载器</h1>
-        <p class="sub">微博 / 小红书 / 抖音 博主作品批量下载 · 三平台相互独立</p>
+        <p class="sub">微博 · 小红书 · 抖音，三平台各自独立</p>
       </div>
     </div>
+
+    <div class="tabs" id="tabs" aria-label="选择平台"></div>
+
     <div class="auth">
-      <span class="dot" id="authDot"></span>
+      <span class="dot" id="authDot" aria-hidden="true"></span>
       <span id="authText">检查登录状态…</span>
+      <span class="auth-sep" aria-hidden="true"></span>
       <button class="btn sm" id="btnLogin">登录</button>
       <button class="btn sm ghost" id="btnLogout">退出</button>
     </div>
   </header>
 
-  <main>
-    <section class="card">
-      <h2>1. 选择平台</h2>
-      <div class="tabs" id="tabs"></div>
-      <p class="hint" id="platformHint"></p>
-      <div class="badges" id="platformBadges"></div>
+  <div class="layout">
 
-      <div class="links" id="links">
-        <div class="link-row">
-          <span class="link-label">官网</span>
-          <code class="link-url" id="siteUrl">—</code>
-          <button class="btn xs" id="btnCopySite">复制</button>
-          <button class="btn xs ghost" id="btnOpenSite">浏览器打开</button>
-        </div>
-        <div class="link-row">
-          <span class="link-label">登录页</span>
-          <code class="link-url" id="loginUrlState">—</code>
-          <button class="btn xs" id="btnCopyLogin">复制</button>
-        </div>
-        <div class="link-row">
-          <span class="link-label">博主主页</span>
-          <code class="link-url" id="targetUrl">（在下面填写后自动显示）</code>
-          <button class="btn xs" id="btnCopyTarget">复制</button>
-        </div>
-      </div>
-    </section>
+    <!-- ===================== 左栏：主路径 ===================== -->
+    <main class="main">
 
-    <section class="card">
-      <h2 id="targetTitle">2. 目标博主</h2>
-      <div class="row row-input">
+      <!-- 1-1 目标输入 -->
+      <section class="card composer">
+        <div class="card-head">
+          <div>
+            <h2 id="targetTitle">目标博主</h2>
+            <p class="card-sub">粘贴主页或作品链接，自动判断要下载多少</p>
+          </div>
+          <span class="pill-soft">自动识别</span>
+        </div>
+
+        <label class="sr-only" for="inputUid">目标链接</label>
         <!-- 用 textarea 而不是 input：要能一次粘贴多条作品链接（一行一条） -->
         <textarea
           id="inputUid"
-          rows="2"
+          rows="3"
           spellcheck="false"
           placeholder="粘贴博主主页链接，或作品链接（多个作品时一行一条）"
         ></textarea>
-        <div class="row-actions">
-          <button class="btn primary" id="btnStart">开始下载</button>
-          <button class="btn ghost" id="btnStop" disabled>停止</button>
-        </div>
-      </div>
-      <!--
-        常驻的「支持哪些输入」说明。
-        为什么必须有这一块：单条作品下载**本来就有**，但它完全靠「粘一条作品链接后自动识别」，
-        界面上没有任何地方提到过它 —— 用户打开软件看不到「单个作品」几个字，
-        自然会得出「这软件没有单条下载功能」的结论。功能存在但不可见，等于不存在。
-        示例来自各平台适配器的 inputMeta（示例随平台切换变化，渲染层不写平台判断）。
-      -->
-      <div class="input-kinds" id="inputKinds">
-        <div class="k-head">支持三种输入，粘贴到下面后会自动识别，不需要手动切换模式：</div>
-        <div class="kind">
-          <span class="k-tag">博主主页</span>
-          <span class="k-desc">批量下载该作者的全部作品</span>
-          <code class="k-eg" id="egProfile">—</code>
-        </div>
-        <div class="kind">
-          <span class="k-tag">单个作品</span>
-          <span class="k-desc">只下载这一条（原图 / 原视频 / Live 图）</span>
-          <code class="k-eg" id="egItem">—</code>
-        </div>
-        <div class="kind">
-          <span class="k-tag">多个作品</span>
-          <span class="k-desc">一行一条，逐个下载</span>
-          <code class="k-eg k-eg-plain">把多条作品链接粘进来即可</code>
-        </div>
-      </div>
-      <p class="hint" id="inputHint"></p>
-      <!-- 输入类型的实时判定结果（主进程判定，见 src/main/url-parse.js）。
-           链接属于其它平台时，右侧直接给一个按钮切过去，省掉「先切选项卡再重新粘贴」这一步 -->
-      <div class="mode-tip" id="inputMode" hidden>
-        <span class="mode-text" id="inputModeText"></span>
-        <button class="btn xs" id="btnSwitchPlatform" hidden></button>
-      </div>
-    </section>
 
-    <section class="card">
-      <h2>3. 保存设置</h2>
-      <div class="row">
-        <input id="inputDir" type="text" placeholder="选择保存目录" readonly />
-        <button class="btn" id="btnDir">浏览…</button>
-      </div>
-      <!-- 只在博主主页模式生效的选项会被隐藏，这里如实说明隐藏了几个（见 app.js 的 applyOptionScope） -->
-      <p class="hint scope-tip" id="optionScopeTip" hidden></p>
-      <div class="grid" id="options"></div>
-      <div class="row ffmpeg-row">
-        <span class="ff" id="ffmpegState">ffmpeg：检测中…</span>
-        <button class="btn sm ghost" id="btnFfmpeg">指定 ffmpeg 路径</button>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>4. 进度</h2>
-      <div class="progress"><div class="bar" id="bar"></div></div>
-      <!-- 当前正在下载的这几个文件各自走到哪了（并发 4 时会有多条） -->
-      <div class="minis" id="minis"></div>
-      <div class="stats">
-        <div><b id="stTotal">0</b><span>总文件</span></div>
-        <div><b id="stDone">0</b><span>已下载</span></div>
-        <div><b id="stSkip">0</b><span>跳过</span></div>
-        <div><b id="stFail">0</b><span>失败</span></div>
-        <div><b id="stItem">0</b><span>作品数</span></div>
-      </div>
-      <div class="livebar">
-        <span class="cur" id="curFile">等待开始</span>
-        <span class="meta" id="liveMeta"></span>
-      </div>
-      <!-- 已用 / 剩余：剩余时间按「已完成比例 ÷ 已用时间」推算，样本不足时不显示（见 app.js 的 renderStats） -->
-      <div class="timing">
-        <span class="t-item">已用 <b id="elapsedText">0:00</b></span>
-        <span class="t-item">剩余 <b id="etaText">—</b></span>
-        <span class="t-item">速度 <b id="speedText">—</b></span>
-      </div>
-      <!-- 失败明细：进度条只给「失败 N」这一个数，出了事还得靠它定位到具体文件 -->
-      <div class="failbox" id="failBox" hidden>
-        <div class="fail-head">
-          <span class="fail-title">失败明细 <b id="failCount">0</b> 项</span>
-          <button class="btn xs ghost" id="btnCopyFail">复制清单</button>
-          <button class="btn xs ghost" id="btnClearFail">清除</button>
+        <!-- 输入类型实时判定结果（主进程判定，见 src/main/url-parse.js）。
+             链接属于其它平台时，右侧直接给一个按钮切过去。 -->
+        <div class="mode-tip" id="inputMode" hidden>
+          <span class="mode-text" id="inputModeText"></span>
+          <button class="btn xs" id="btnSwitchPlatform" hidden></button>
         </div>
-        <div class="fail-list" id="failList"></div>
-      </div>
-      <div class="row">
-        <span id="phaseText" class="phase">空闲</span>
-        <button class="btn sm ghost" id="btnOpen" disabled>打开保存目录</button>
-      </div>
-    </section>
 
-    <section class="card">
-      <div class="log-head">
-        <h2>日志</h2>
-        <div class="log-actions">
-          <span class="log-count" id="logCount">0 条</span>
-          <button class="btn xs ghost" id="btnCopyLog">复制全部</button>
-          <button class="btn xs ghost" id="btnClearLog">清空</button>
-          <button class="btn xs" id="btnExportLog">导出日志</button>
+        <div class="row row-input">
+          <div class="row-actions">
+            <button class="btn primary" id="btnStart">开始下载</button>
+            <button class="btn ghost" id="btnStop" disabled>停止</button>
+          </div>
+          <span class="paste-hint"><kbd>Ctrl</kbd><kbd>V</kbd> 可直接粘贴分享文案</span>
         </div>
-      </div>
-      <!-- 日志工具栏：按级别筛选 + 关键字检索 + 是否自动跟随最新。
-           一场长任务会写几千行，"翻到最后一条错误"必须先能过滤 -->
-      <div class="log-tools">
-        <div class="seg" id="logFilter">
-          <button class="seg-item active" data-level="all">全部 <b id="cntAll">0</b></button>
-          <button class="seg-item" data-level="info">信息 <b id="cntInfo">0</b></button>
-          <button class="seg-item" data-level="ok">成功 <b id="cntOk">0</b></button>
-          <button class="seg-item" data-level="warn">警告 <b id="cntWarn">0</b></button>
-          <button class="seg-item" data-level="err">错误 <b id="cntErr">0</b></button>
-        </div>
-        <input
-          type="text"
-          id="logSearch"
-          class="log-search"
-          spellcheck="false"
-          placeholder="筛选关键字（文件名 / 作品 id / 错误信息）"
-        />
-        <button class="btn xs ghost" id="btnLogFollow" title="关闭后向上翻看日志不会被自动拉回底部">跟随最新：开</button>
-      </div>
-      <div class="log-wrap">
-        <div class="log" id="log"></div>
-        <button class="log-new" id="btnLogNew" hidden>↓ 有新日志</button>
-      </div>
-    </section>
-  </main>
 
-  <div class="modal" id="cookieModal">
+        <!-- 常驻的「支持哪些输入」说明。
+             功能存在但界面上看不见，等于不存在 —— 单条作品下载过去就是这样被忽略的。 -->
+        <div class="input-kinds" id="inputKinds">
+          <div class="k-head">支持三种输入，粘贴后自动识别，不需要手动切换模式</div>
+          <div class="kind">
+            <span class="k-tag">博主主页</span>
+            <span class="k-desc">批量下载该作者的全部作品</span>
+            <code class="k-eg" id="egProfile">—</code>
+          </div>
+          <div class="kind">
+            <span class="k-tag">单个作品</span>
+            <span class="k-desc">只下载这一条（原图 / 原视频 / Live 图）</span>
+            <code class="k-eg" id="egItem">—</code>
+          </div>
+          <div class="kind">
+            <span class="k-tag">多个作品</span>
+            <span class="k-desc">一行一条，逐个下载</span>
+            <code class="k-eg k-eg-plain">把多条作品链接粘进来即可</code>
+          </div>
+        </div>
+
+        <p class="hint" id="inputHint"></p>
+      </section>
+
+      <!-- 1-2 进度 -->
+      <section class="card task">
+        <div class="card-head">
+          <div>
+            <h2>下载进度</h2>
+          </div>
+          <div class="task-head-right">
+            <span class="phase" id="phaseText" aria-live="polite">空闲</span>
+            <button class="btn sm" id="btnOpen" disabled>打开保存目录</button>
+          </div>
+        </div>
+
+        <div class="progress" aria-hidden="true"><div class="bar" id="bar"></div></div>
+
+        <div class="livebar">
+          <span class="cur" id="curFile">等待开始</span>
+          <span class="meta" id="liveMeta"><span class="meta-idle">尚未开始</span></span>
+        </div>
+
+        <!-- 并发中的文件各自一条细进度条：大视频卡在一个文件上也看得见在动 -->
+        <div class="minis" id="minis"></div>
+
+        <div class="stats">
+          <div><b id="stTotal">0</b><span>总文件</span></div>
+          <div><b id="stDone">0</b><span>已下载</span></div>
+          <div><b id="stSkip">0</b><span>跳过</span></div>
+          <div><b id="stFail">0</b><span>失败</span></div>
+          <div><b id="stItem">0</b><span>作品数</span></div>
+        </div>
+
+        <div class="timing">
+          <span class="t-item">已用 <b id="elapsedText">0:00</b></span>
+          <span class="t-item">剩余 <b id="etaText">—</b></span>
+          <span class="t-item">速度 <b id="speedText">—</b></span>
+        </div>
+
+        <!-- 失败明细：进度条只给「失败 N」，出了事得能落到具体文件 -->
+        <div class="failbox" id="failBox" hidden>
+          <div class="fail-head">
+            <span class="fail-title">失败明细 <b id="failCount">0</b> 项</span>
+            <button class="btn xs ghost" id="btnCopyFail">复制清单</button>
+            <button class="btn xs ghost" id="btnClearFail">清除</button>
+          </div>
+          <div class="fail-list" id="failList"></div>
+        </div>
+      </section>
+
+      <!-- 1-3 日志 -->
+      <section class="card logs">
+        <div class="log-head">
+          <h2>日志</h2>
+          <div class="log-actions">
+            <span class="log-count" id="logCount">0 条</span>
+            <button class="btn xs ghost" id="btnCopyLog">复制全部</button>
+            <button class="btn xs ghost" id="btnClearLog">清空</button>
+            <button class="btn xs" id="btnExportLog">导出日志</button>
+          </div>
+        </div>
+
+        <!-- 按级别筛选 + 关键字检索 + 是否自动跟随最新 -->
+        <div class="log-tools">
+          <div class="seg" id="logFilter">
+            <button class="seg-item active" data-level="all">全部 <b id="cntAll">0</b></button>
+            <button class="seg-item" data-level="info">信息 <b id="cntInfo">0</b></button>
+            <button class="seg-item" data-level="ok">成功 <b id="cntOk">0</b></button>
+            <button class="seg-item" data-level="warn">警告 <b id="cntWarn">0</b></button>
+            <button class="seg-item" data-level="err">错误 <b id="cntErr">0</b></button>
+          </div>
+          <input
+            type="text"
+            id="logSearch"
+            class="log-search"
+            spellcheck="false"
+            placeholder="筛选关键字（文件名 / 作品 id / 错误信息）"
+          />
+          <button class="btn xs ghost" id="btnLogFollow" title="关闭后向上翻看日志不会被自动拉回底部">跟随最新：开</button>
+        </div>
+
+        <div class="log-wrap">
+          <div class="log" id="log" role="log" aria-label="运行日志"><div class="log-empty">还没有日志。开始一次下载后，这里会实时输出每一步。</div></div>
+          <button class="log-new" id="btnLogNew" hidden>↓ 有新日志</button>
+        </div>
+      </section>
+    </main>
+
+    <!-- ===================== 右栏：设置与平台信息 ===================== -->
+    <aside class="side">
+
+      <section class="card panel">
+        <div class="card-head">
+          <div>
+            <h2>下载设置</h2>
+            <p class="card-sub">按平台分别记忆</p>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="panel-label" id="dirLabel">保存位置</div>
+          <div class="dir-row">
+            <input id="inputDir" type="text" placeholder="尚未选择保存目录" readonly aria-labelledby="dirLabel" />
+            <button class="btn sm" id="btnDir">浏览…</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="panel-label">下载内容</div>
+          <!-- 只在部分选项被隐藏时出现（见 app.js 的 applyOptionScope）。
+               放在选项列表上方，与「下方已隐藏 N 个」的文案方向一致。 -->
+          <p class="hint scope-tip" id="optionScopeTip" hidden></p>
+          <div class="grid" id="options"></div>
+        </div>
+
+        <div class="ffmpeg-row">
+          <span class="ff" id="ffmpegState">ffmpeg：检测中…</span>
+          <button class="btn xs ghost" id="btnFfmpeg">指定路径</button>
+        </div>
+      </section>
+
+      <section class="card panel">
+        <div class="card-head">
+          <div>
+            <h2>当前平台</h2>
+            <p class="card-sub">能力与地址，复制给别的设备用</p>
+          </div>
+        </div>
+
+        <div class="badges" id="platformBadges"></div>
+        <p class="hint" id="platformHint"></p>
+
+        <div class="links" id="links">
+          <div class="link-row">
+            <span class="link-label">官网</span>
+            <code class="link-url" id="siteUrl">—</code>
+            <button class="btn xs" id="btnCopySite" title="复制官网链接">复制</button>
+            <button class="btn xs ghost" id="btnOpenSite">打开</button>
+          </div>
+          <div class="link-row">
+            <span class="link-label">登录页</span>
+            <code class="link-url" id="loginUrlState">—</code>
+            <button class="btn xs" id="btnCopyLogin" title="复制登录页地址">复制</button>
+          </div>
+          <div class="link-row">
+            <span class="link-label">博主主页</span>
+            <code class="link-url" id="targetUrl">（在上面填写后自动显示）</code>
+            <button class="btn xs" id="btnCopyTarget" title="复制博主主页链接">复制</button>
+          </div>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <!-- ===================== 手动 Cookie（仅微博） ===================== -->
+  <div class="modal" id="cookieModal" role="dialog" aria-modal="true" aria-labelledby="cookieTitle">
     <div class="modal-box">
-      <h3>手动粘贴 Cookie（微博）</h3>
+      <h3 id="cookieTitle">手动粘贴 Cookie（微博）</h3>
       <p class="hint">
         在浏览器已登录微博的页面按 F12 → Network → 任意请求 → 复制 Request Headers 里的整条 Cookie，
         粘贴到下面。仅在登录窗口拿不到登录态时才需要。
       </p>
-      <textarea id="cookieText" rows="6" placeholder="SUB=xxx; SUBP=xxx; SSOLoginState=xxx"></textarea>
+      <textarea id="cookieText" rows="6" spellcheck="false" placeholder="SUB=xxx; SUBP=xxx; SSOLoginState=xxx"></textarea>
       <div class="row end modal-actions">
         <button class="btn ghost" id="btnCookieCancel">取消</button>
         <button class="btn primary" id="btnCookieSave">保存</button>
@@ -206,7 +270,7 @@
     </div>
   </div>
 
-  <div class="toast" id="toast"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
 </div>
 <script src="app.js"></script>
 </body>

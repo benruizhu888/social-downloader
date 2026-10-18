@@ -14,7 +14,8 @@
  *   小红书  xiaohongshu.com/explore/<id>?xsec_token=…、
  *           xiaohongshu.com/discovery/item/<id>、user/profile/<uid>/<id>
  *   抖音    douyin.com/video/<id>、douyin.com/note/<id>、
- *           douyin.com/…?modal_id=<id>、iesdouyin.com/share/video/<id>
+ *           douyin.com/…?modal_id=<id>、douyin.com/…?vid=<id>（信息流页正在播放的那条）、
+ *           iesdouyin.com/share/video/<id>；`/user/<sec_uid>` 及其子页是博主主页
  *
  * 另外识别 `v.douyin.com` / `xhslink.com` 短链。短链的真实地址只能联网展开，
  * 这里只负责「认出来」，展开动作在 TaskRunner 里做（见 _expandShortLink）。
@@ -219,22 +220,114 @@ function parseXhs(u) {
   return { itemId: id, altIds: [], token: u.searchParams.get('xsec_token') || '', url: u.toString() };
 }
 
-/** 抖音：video / note 两种路径，另加 modal_id 参数形态 */
-function parseDouyin(u) {
+/* --------------------------------- 抖音 --------------------------------- */
+
+/**
+ * 抖音链接形状判定（纯函数 · 单一事实来源）。
+ *
+ * 为什么必须抽成一个函数，而不是让 `parseDouyin` 各判各的：
+ * 「这条抖音链接到底是不是作品页」有**两个使用方** ——
+ *   · 解析层：决定走单作品流程（parseDouyin）
+ *   · 守门层：决定要不要在开浏览器前就把话说明白（platforms/douyin.js）
+ * 两处各写一套正则，迟早出现「解析说不是作品、守门说过得去」的缝，
+ * 而缝里的那一次跑动，用户要白等 20~40 秒才看到一句指向「登录/链接/页面」的报错。
+ *
+ * 判定给出的 kind：
+ *   work      作品页（/video|note/<id>、/share/…/<id>、?modal_id=<id>、信息流页的 ?vid=<id>）
+ *   profile   博主主页（/user/<sec_uid>，含其下的子页）
+ *   search    搜索结果 / 话题 / 特效页 —— 一定不是某位博主的主页
+ *   feed      推荐 / 精选 / 关注 / 直播等信息流页 —— 同上
+ *   workNoId  看着是作品页，但取不到有效 id（链接被截断）
+ *   unknown   认不出来（分享页、未知路径…）→ 保持旧行为，交给调用方
+ *
+ * @param {URL} u 已解析的地址
+ * @returns {{kind:string, id:string}}
+ */
+function classifyDouyinUrl(u) {
   const path = u.pathname.replace(/\/+$/, '');
-  let id = '';
-  let m = path.match(/^\/(?:video|note)\/(\d{15,25})$/i);
-  if (m) id = m[1];
-  if (!id) {
-    m = path.match(/^\/share\/(?:video|note)\/(\d{15,25})$/i); // iesdouyin 分享页
-    if (m) id = m[1];
+  // /user/<sec_uid> 及其子页（/user/<uid>/fans 之类）都算主页
+  const isProfilePath = /^\/user\/[A-Za-z0-9_-]+(?:\/|$)/i.test(path);
+  const modal = u.searchParams.get('modal_id') || '';
+  const vid = u.searchParams.get('vid') || '';
+
+  // 作品 id 三个来源，优先级：路径 > modal_id > vid
+  let m = path.match(/^\/(?:video|note)\/(\d{15,25})$/i) || path.match(/^\/share\/(?:video|note)\/(\d{15,25})$/i);
+  let id = m ? m[1] : '';
+  if (!id && /^\d{15,25}$/.test(modal)) id = modal;
+  /**
+   * `vid=`：抖音在信息流页（首页推荐 / 发现 / 精选）用这个参数标记「正在播放的那条作品」。
+   * 用户 2026-10-16 的日志里能看到它的形态：
+   *   /user/…?enter_from=author_card&from_gid=7670006158224573684&…&vid=7670006158224573684
+   *
+   * ⚠️ 只在**非主页**路径下认它。上面那条例子里 `/user/<sec_uid>?…&vid=<id>` 是
+   * 「从某条视频点进博主主页」留下的出处参数，**不是要下载的作品**；
+   * 若在这里认了它，用户粘一次「下载该博主全部作品」的主页链接就会变成只下一条 ——
+   * 正是本模块开头那句「宁可不识别」要防的错。
+   */
+  if (!id && /^\d{15,25}$/.test(vid) && !isProfilePath && !/^\/share\/user/i.test(path)) id = vid;
+  if (id) return { kind: 'work', id };
+
+  if (isProfilePath) return { kind: 'profile', id: '' };
+  if (/^\/(?:search|jingxuan\/search|hashtag|challenge|topic|music)(?:\/|$)/i.test(path)) {
+    return { kind: 'search', id: '' };
   }
-  if (!id) {
-    const modal = u.searchParams.get('modal_id') || '';
-    if (/^\d{15,25}$/.test(modal)) id = modal;
+  // 末尾斜杠已在上面剥掉，所以首页的 path 就是空串
+  if (path === '') return { kind: 'feed', id: '' }; // douyin.com 首页 = 推荐流
+  if (/^\/(?:discover|recommend|foryou|hot|live|follow|following|jingxuan|collection|mix|nearby)(?:\/|$)/i.test(path)) {
+    return { kind: 'feed', id: '' };
   }
-  if (!id) return null;
+  if (/^\/(?:video|note|share\/video|share\/note)(?:\/|$)/i.test(path)) return { kind: 'workNoId', id: '' };
+  return { kind: 'unknown', id: '' };
+}
+
+/** 抖音：video / note / share 路径，另加 modal_id 与信息流页的 vid 形态（判定见 classifyDouyinUrl） */
+function parseDouyin(u) {
+  const { kind, id } = classifyDouyinUrl(u);
+  if (kind !== 'work' || !id) return null;
   return { itemId: id, altIds: [], url: `https://www.douyin.com/video/${id}` };
+}
+
+/** 「怎么拿到正确的链接」这段建议，三种问题共用（避免三份文案各自漂移） */
+const DOUYIN_HOWTO =
+  '要下单个作品：在浏览器里打开那条视频后复制地址栏（地址里会带 /video/作品id 或 modal_id=作品id），' +
+  '或在抖音 App 里点「分享 → 复制链接」拿到 v.douyin.com 短链；' +
+  '要批量下载某位博主：粘贴他的主页链接（地址里带 /user/…）。';
+
+/**
+ * 抖音输入体检：给「准备按博主主页处理」的这条链接做一次形状判断。
+ *
+ * 为什么需要它 —— 用户 2026-10-16 的日志：连续三次「任务开始（博主主页）」的输入
+ * 其实是抖音的搜索/精选结果页（`douyin.com/jingxuan/search/爱心代码?aid=…&type=general`）。
+ * 解析层认不出作品 id 就 return null，而 null 的语义是「不是作品链接 → 按博主主页处理」，
+ * 于是这些链接被静默降级成主页采集：打开搜索页 → 搜索页根本不请求主页作品接口
+ * （它走 /search/item，在白名单黑名单里）→ 截获 0 个响应 → 重载一次再等 ≈20~40 秒 →
+ * 抛出一句把原因指向「① 已登录 ② 链接正确 ③ 页面能显示作品」的错误。
+ * 用户看到的就是「抖音这条视频下不了」。
+ *
+ * 判定刻意保守：**只拦「一定不是主页」的那几类**（search / feed / workNoId），
+ * 认出 unknown 一律放过（继续按主页处理）—— 宁可多跑一次，也不能把主页链接拦下来。
+ *
+ * @returns {string} 空串 = 不必拦；否则是可以直接展示给用户的说明
+ */
+function douyinInputProblem(input) {
+  const u = toUrl(input);
+  if (!u) return '';
+  const host = u.hostname.toLowerCase().replace(/^www\./i, '');
+  if (!/(^|\.)(douyin\.com|iesdouyin\.com)$/.test(host)) return '';
+  const { kind } = classifyDouyinUrl(u);
+  if (kind === 'search') {
+    return `这条链接是抖音的搜索结果 / 话题页，里面没有作品 id，没法下载。${DOUYIN_HOWTO}`;
+  }
+  if (kind === 'feed') {
+    return `这条链接是抖音的推荐 / 精选 / 关注这类信息流页，既不是博主主页也不是某个作品。${DOUYIN_HOWTO}`;
+  }
+  if (kind === 'workNoId') {
+    return (
+      '这条链接看着是抖音作品页，但里面没有有效的作品 id（19 位数字）—— ' +
+      '多半是复制时被截断或漏了参数。请重新完整复制一次作品链接（App 里用「分享 → 复制链接」）。'
+    );
+  }
+  return '';
 }
 
 /**
@@ -307,12 +400,21 @@ function parseInputList(text) {
   for (const line of lines) {
     const r = parseSingleUrl(line);
     if (!r) {
-      // 分开说「主页链接」和「根本不是链接」——两者的处置建议完全不同
+      /**
+       * 分开说「主页链接」「该平台的其它页面」和「根本不是链接」—— 三者的处置建议完全不同。
+       *
+       * 为什么把 douyinInputProblem 排在前面：抖音的搜索页也是「受支持站点的地址」，
+       * 早先它会被 `looksLikeProfile` 说成「这是博主主页链接」——用户按这句话去查自己的主页链接，
+       * 白忙一场。真有平台说得清这是什么页面，就用平台的说法。
+       */
+      const problem = douyinInputProblem(line);
       ignored.push({
         line,
-        reason: looksLikeProfile(line)
-          ? '这是博主主页链接（批量模式只处理作品链接）'
-          : '不是受支持的作品链接',
+        reason: problem
+          ? problem.split('。')[0]
+          : looksLikeProfile(line)
+            ? '这是博主主页链接（批量模式只处理作品链接）'
+            : '不是受支持的作品链接',
       });
       continue;
     }
@@ -345,4 +447,7 @@ module.exports = {
   isShortLinkHost,
   midToId,
   idToMid,
+  /** 抖音专用：链接形状判定与「不能当主页处理」的说明（platforms/douyin.js 与界面共用） */
+  classifyDouyinUrl,
+  douyinInputProblem,
 };

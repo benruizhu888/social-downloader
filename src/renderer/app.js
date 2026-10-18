@@ -560,7 +560,10 @@ function renderStats() {
   const live = processed + inflightFraction(); // 含当前文件的小数部分
   const pct = total ? Math.min(100, Math.round((live / total) * 100)) : 0;
   $('bar').style.width = (total ? Math.min(100, (live / total) * 100) : 0).toFixed(2) + '%';
-  $('curFile').textContent = state.curFile || (state.running ? '准备中…' : '等待开始');
+  // 跑完一轮后不要退回「等待开始」：统计显示 40/40、阶段显示「完成」，这里却写着等待，
+  // 用户会以为任务没执行。只有一次都没跑过才用初始文案。
+  const idleText = state.startedAt && !state.running ? '任务已结束' : '等待开始';
+  $('curFile').textContent = state.curFile || (state.running ? '准备中…' : idleText);
 
   /**
    * 剩余时间估算：已完成比例 ÷ 已用时间 → 速率，再除以剩余量。
@@ -834,16 +837,16 @@ function applyInputMode(mode, info) {
 
   if (state.inputMode === 'batch') {
     const n = (info && info.count) || 0;
-    $('targetTitle').textContent = '2. 目标作品（多个）';
+    $('targetTitle').textContent = '目标作品（多个）';
     setStartLabel(n ? `下载这 ${n} 个作品` : '没有可下载的作品');
     // 一条都没生效时直接禁用：点下去只会看到一个报错，不如提前拦住
     if (!state.running) btn.disabled = n === 0;
   } else if (state.inputMode === 'single') {
-    $('targetTitle').textContent = '2. 目标作品';
+    $('targetTitle').textContent = '目标作品';
     setStartLabel(`下载这个${(info && info.platformName) || ''}作品`);
     if (!state.running) btn.disabled = false;
   } else {
-    $('targetTitle').textContent = '2. 目标博主';
+    $('targetTitle').textContent = '目标博主';
     setStartLabel('开始下载');
     if (!state.running) btn.disabled = false;
   }
@@ -929,6 +932,21 @@ async function runInspect() {
   }
   if (!r || r.mode === 'empty') r = { mode: 'profile' };
   lastInspect = r;
+
+  /**
+   * invalid：这条链接是**该平台的其它页面**（例如抖音的搜索页 / 信息流页）——
+   * 既不是博主主页，也不是作品链接。提前把话说清楚，别让用户点了开始才看到一句
+   * 把原因指向「① 已登录 ② 链接正确 ③ 页面能显示作品」的报错（他正是拿着那种日志来问问题的）。
+   *
+   * 按钮**不禁用**：判定万一是错的，用户仍然可以跑；主进程用的是同一份判定，
+   * 会用同一句话回给他 —— 界面上「提前说」与「跑起来报」永远一致。
+   */
+  if (r.mode === 'invalid') {
+    show(true, `⚠️ ${r.text}`);
+    setSwitchButton('', '');
+    applyInputMode('profile');
+    return;
+  }
 
   // profile：不是作品链接，按原来的博主主页流程走，界面保持原样
   if (r.mode === 'profile') {

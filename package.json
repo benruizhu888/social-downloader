@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "test": "node tools/run-tests.js",
-    "test:list": "node test/single-download.test.js && node test/single-download-edge.test.js && node test/single-download-e2e.test.js && node test/platform-contract.test.js && node test/url-guard-coalesce.test.js && node test/downloader-host-backoff.test.js && node test/renderer-refs.test.js && node test/log-progress.test.js && node test/log-edge.test.js && node test/progress-edge.test.js && node test/renderer-smoke.test.js && node test/renderer-events.test.js && node test/feature-interaction.test.js",
+    "test:list": "node test/single-download.test.js && node test/single-download-edge.test.js && node test/single-download-e2e.test.js && node test/platform-contract.test.js && node test/url-guard-coalesce.test.js && node test/downloader-host-backoff.test.js && node test/renderer-refs.test.js && node test/log-progress.test.js && node test/log-edge.test.js && node test/progress-edge.test.js && node test/renderer-smoke.test.js && node test/renderer-events.test.js && node test/feature-interaction.test.js && node test/douyin-input-guard.test.js",
     "pack": "node tools/pack-asar.js",
     "install-asar": "node tools/install-asar.js"
   },

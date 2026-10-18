@@ -293,7 +293,7 @@ function createMainWindow() {
     minWidth: 900,
     minHeight: 680,
     title: '社交平台作品下载器',
-    backgroundColor: '#f6f7f9',
+    backgroundColor: '#f3f4f6',
     // 先不显示：等首帧渲染好再 show。
     // 否则窗口会先亮出一个纯背景色的空壳，用户看到的就是「打开时闪一下白屏」——
     // 最大化/全屏时若正赶上重排，这一帧空白会更明显。
@@ -729,6 +729,26 @@ ipcMain.handle('settings:get', () => loadSettings());
 ipcMain.handle('settings:set', (e, patch) => saveSettings(patch || {}));
 
 /**
+ * 依次问各平台适配器「这条输入有没有问题」，第一个给出说法的就用它。
+ *
+ * 为什么由适配器回答，而不是主进程自己认平台 id：三条主线（登录 / 采集 / 解析）
+ * 都遵守「平台差异收敛在适配器里」这条规矩。主进程一旦开始按 id 分支，
+ * 以后加平台就会漏改这里 —— 而漏改的表现是「某个平台的错误链接又白跑一次采集」。
+ */
+function inputProblemOf(input) {
+  for (const p of registry.list) {
+    if (typeof p.inspectInput !== 'function') continue;
+    try {
+      const r = p.inspectInput(input);
+      if (r && r.problem) return r.problem;
+    } catch {
+      /* 适配器自己的判断出错，不能让「输入检查」整体挂掉 */
+    }
+  }
+  return '';
+}
+
+/**
  * 判定输入框里粘的是「博主主页」「单个作品」还是「一批作品链接」。
  *
  * 为什么要走主进程而不是界面里自己写正则：
@@ -739,6 +759,7 @@ ipcMain.handle('settings:set', (e, patch) => saveSettings(patch || {}));
  * 返回 `mode`：
  *   empty    没输入
  *   profile  不是作品链接（按原来的博主主页流程处理）
+ *   invalid  是该平台的其它页面（例如抖音的搜索页/信息流页）—— 一定跑不出结果，附 `text` 说明
  *   single   一条作品链接
  *   batch    多行作品链接
  */
@@ -758,7 +779,16 @@ ipcMain.handle('input:inspect', (e, payload) => {
   // 单行 —— 保持与原行为完全一致
   if (list.lines === 1) {
     const r = list.targets[0];
-    if (!r) return { mode: 'profile', currentName: curName };
+    if (!r) {
+      /**
+       * 「不是作品链接」还有第二种可能：**它是这个平台的其它页面**
+       * （抖音的搜索页 / 信息流页就是这种）。这类链接按博主主页处理只会白跑一次采集，
+       * 于是先问一遍平台适配器 —— 由平台自己决定认不认得出来（见 douyin.inspectInput）。
+       */
+      const problem = inputProblemOf(payload?.input);
+      if (problem) return { mode: 'invalid', currentName: curName, text: problem };
+      return { mode: 'profile', currentName: curName };
+    }
     return {
       mode: 'single',
       platform: r.platform || '',

@@ -3,8 +3,8 @@
  * 把打包好的 app.asar 安装到已安装的应用目录（**自动备份，可一键回滚**）
  *
  * 用法：
- *   node tools/install-asar.js                       # 默认装到 D:\LOCAL_USERNAME_PLACEHOLDER\social-downloader\resources
- *   node tools/install-asar.js "D:\某处\resources"    # 指定目标
+ *   node tools/install-asar.js                       # 默认装到 D:\Path\To\YourApp\resources
+ *   node tools/install-asar.js "D:\某处\resources"    # 指定目标（推荐）
  *
  * 做了什么：
  *   1. 检查目标目录里确实有 app.asar（确认没指错地方）
@@ -20,7 +20,9 @@ const fs = require('fs');
 const path = require('path');
 
 const SRC = path.resolve(__dirname, '..', 'dist', 'app.asar');
-const TARGET_DIR = path.resolve(process.argv[2] || 'D:/LOCAL_USERNAME_PLACEHOLDER/social-downloader/resources');
+// 默认目标是一个通用占位路径 —— 不含任何本机信息。
+// 实际使用时几乎总要传参：node tools/install-asar.js "C:/Apps/YourApp/resources"
+const TARGET_DIR = path.resolve(process.argv[2] || 'D:/Path/To/YourApp/resources');
 const TARGET = path.join(TARGET_DIR, 'app.asar');
 
 function stamp() {

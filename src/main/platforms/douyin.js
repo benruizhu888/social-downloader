@@ -8,6 +8,7 @@
 const { Harvester } = require('../core/harvester');
 const { SingleHarvester } = require('../core/single-harvest');
 const { parseDouyinResponse } = require('../sources/parsers/douyin');
+const { douyinInputProblem } = require('../url-parse');
 
 /** 从主页链接里提取 sec_uid，用于建目录 */
 function extractChannelId(input) {
@@ -167,7 +168,33 @@ module.exports = {
   extractChannelId,
   normalizeHome,
 
+  /**
+   * 界面用它提前提示（主进程判定输入类型时调用，见 main.js 的 `input:inspect`）。
+   *
+   * 与 `collectItems` 开头那道守门**是同一份判定**（都走 url-parse.douyinInputProblem），
+   * 所以「界面说这条链接不行」和「点开始后真的报错」永远是同一句话，
+   * 不会出现「界面说没事、跑起来才报错」这种最难查的分歧。
+   *
+   * @returns {null|{problem:string}} null = 这条输入没问题
+   */
+  inspectInput(input) {
+    const problem = douyinInputProblem(input);
+    return problem ? { problem } : null;
+  },
+
   async collectItems({ input, ctx, emit, log, setCollector }) {
+    /**
+     * 守门：抖音的搜索页 / 信息流页不可能是某位博主的主页。
+     *
+     * 用户 2026-10-16 的日志：三次「任务开始（博主主页）」的输入其实是
+     * `douyin.com/jingxuan/search/<关键词>?aid=…`，被静默降级成主页采集 ——
+     * 打开搜索页、截获 0 个响应、重载一次再等，20~40 秒后才报一句
+     * 把原因指向「登录 / 链接 / 页面」的错。这里在**开浏览器之前**就拦下来，
+     * 并把「该粘什么链接」一次说清。
+     */
+    const bad = douyinInputProblem(input);
+    if (bad) throw new Error(bad);
+
     const targetUid = extractChannelId(input);
     let droppedForeign = 0;
     const harvester = new Harvester({

@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-10-15T15:13:41.739Z",
-  "source": "D:\\17930\\social-downloader-src",
-  "output": "D:\\17930\\social-downloader-src-redacted",
+  "generatedAt": "2026-10-18T04:24:11.713Z",
+  "source": "<原工程根目录>",
+  "output": "<脱敏副本输出目录>",
   "mode": "standard（标准：仅凭证 / 身份 / 本机信息）",
   "excludedDirs": [
     "node_modules",
@@ -68,6 +68,22 @@
         {
           "id": "R4",
           "type": "小红书账号 ID（真实格式 24 位十六进制）",
+          "count": 1
+        },
+        {
+          "id": "R5",
+          "type": "小红书笔记 ID（真实格式 24 位十六进制）",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "path": "test/douyin-input-guard.test.js",
+      "replacements": 2,
+      "rules": [
+        {
+          "id": "R2",
+          "type": "抖音用户身份标识 (sec_uid)",
           "count": 1
         },
         {
@@ -192,17 +208,6 @@
           "count": 5
         }
       ]
-    },
-    {
-      "path": "tools/install-asar.js",
-      "replacements": 2,
-      "rules": [
-        {
-          "id": "R6b",
-          "type": "非标准盘符下的用户目录路径",
-          "count": 2
-        }
-      ]
     }
   ],
   "binaries": [],
@@ -217,16 +222,15 @@
     }
   ],
   "ruleTotals": {
-    "R5": 15,
-    "R2": 3,
+    "R5": 16,
+    "R2": 4,
     "R1": 5,
     "R4": 5,
-    "R3": 17,
-    "R6b": 2
+    "R3": 17
   },
   "stats": {
-    "files": 47,
-    "textFiles": 47,
+    "files": 53,
+    "textFiles": 53,
     "binaryFiles": 0,
     "replaced": 47,
     "changedFiles": 10
