@@ -6,76 +6,42 @@
  */
 const { Harvester } = require('../core/harvester');
 const { SingleHarvester } = require('../core/single-harvest');
-const { parseXhsResponse } = require('../sources/parsers/xhs');
+const { parseXhsResponseDetailed, hasMore: pageHasMore } = require('../sources/parsers/xhs');
+const { normalizeHome, makeExtractChannelId, makeToUnified } = require('./common');
 
 /** 从主页链接里提取账号标识，用于建目录 */
-function extractChannelId(input) {
-  const s = String(input || '');
-  const m = s.match(/user\/profile\/([A-Za-z0-9]+)/);
-  if (m) return m[1];
-  const m2 = s.match(/\/user\/([A-Za-z0-9_-]+)/);
-  if (m2) return m2[1];
-  return 'unknown';
-}
+const extractChannelId = makeExtractChannelId([
+  /user\/profile\/([A-Za-z0-9]+)/,
+  /\/user\/([A-Za-z0-9_-]+)/,
+]);
 
-function normalizeHome(input) {
-  const s = String(input || '').trim();
-  return /^https?:\/\//i.test(s) ? s : 'https://' + s;
-}
-
-function toUnified(it) {
-  const medias = [];
-  for (const m of it.medias || []) {
-    if (m.kind === 'image') {
-      medias.push({
-        kind: 'image',
-        url: m.url,
-        // 解析层已按「原图优先」排好序，这里整条链带过去，由编排层按开关取舍
-        candidates: [m.url, ...(m.altUrls || [])],
-        ext: m.ext || 'jpg',
-      });
-    } else if (m.kind === 'livephoto') {
-      medias.push({
-        kind: 'livephoto',
-        url: m.url,
-        altUrls: [],
-        ext: 'mp4',
-        cover: m.cover || null,
-        coverCandidates: m.cover ? [m.cover, ...(m.altUrls || [])] : [],
-      });
-    } else if (m.kind === 'video') {
-      medias.push({
-        kind: 'video',
-        url: m.url,
-        ext: m.ext || 'mp4',
-        cover: m.cover || null,
-        coverCandidates: m.cover ? [m.cover] : [],
-      });
-    }
-  }
-  return {
-    id: it.id,
-    title: it.title || '',
-    dateHint: it.createdAt || '',
-    filePrefix: '',
-    folderTitle: it.title || '',
-    author: it.author || '',
-    likeCount: it.likeCount,
-    /**
-     * ⚠️ 令牌必须一起带到统一模型里 —— 这是本轮修掉的那个「每篇只下一张封面」的真凶。
-     *
-     * 采集器把「统一 item」交给 `detailUrlOf` 去算详情地址，而它算的时候会**再查一次
-     * `it.xsecToken`**。早先这里没把令牌带出来，于是：
-     *   · 解析层算出的 `noteDetail` 是**带令牌的**（对的）
-     *   · 采集器重算出来的却是**裸 `/explore/<id>`**（令牌丢了）
-     * 而真正被 loadURL 打开的是后者 → 小红书对无令牌地址返回空壳 →
-     * 10 篇详情页全都补不出图集，日志只显示「成功补全 0 / 10」，看不出任何原因。
-     */
+/**
+ * 统一模型映射（公共部分在 platforms/common.js，这里只注入小红书特有字段）。
+ *
+ * ⚠️ 令牌必须一起带到统一模型里 —— 这是那个「每篇只下一张封面」的真凶：
+ * 采集器把统一 item 交给 `detailUrlOf` 去算详情地址，而它算的时候会**再查一次**
+ * `it.xsecToken`。早先这里没把令牌带出来，于是解析层算出的详情地址（带令牌）
+ * 被采集器重算成裸 `/explore/<id>`（会跳 404），10 篇详情页全都补不出图集。
+ */
+const toUnified = makeToUnified({
+  extra: (it) => ({
     xsecToken: it.xsecToken || '',
     /** 详情页地址（带上打开它必需的 xsec_token）——列表页只给封面，完整图集要去这里拿 */
     noteDetail: noteDetailUrlOf(it),
-    medias,
-  };
+  }),
+});
+
+/**
+ * 采集器用的「一页解析」：同时给出 items / 跳过条数 / 是否还有下一页。
+ *
+ * 为什么要带回 `skipped` 与 `hasMore`：
+ *   · skipped：一条脏数据只丢它自己（P1-5），但必须让上层能如实告诉用户「跳过 N 条」；
+ *   · hasMore：页面自己说没有下一页时，采集循环可以把 idle 直接抬到上限，
+ *     立刻收工 —— 早先一律靠「连续 5 轮无新增」猜，多等十几秒（J-1）。
+ */
+function parsePage(data) {
+  const r = parseXhsResponseDetailed(data);
+  return { items: r.items.map(toUnified), skipped: r.skipped, hasMore: pageHasMore(data) };
 }
 
 /**
@@ -146,8 +112,9 @@ module.exports = {
   inputMeta: {
     placeholder: '粘贴小红书博主主页链接，或单篇笔记链接',
     hint: '小红书：主页链接批量下载；单篇笔记链接只下载这一条。采集靠内置浏览器滚动加载，必须先登录。',
-    exampleProfile: 'https://www.xiaohongshu.com/user/profile/XHS_USER_ID_PLACEHOLDER',
-    exampleItem: 'https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER?xsec_token=XHS_XSEC_TOKEN_PLACEHOLDER',
+    // 示例值：给个「链接长什么样」的形状即可，不要写任何真实博主/笔记 id
+    exampleProfile: 'https://www.xiaohongshu.com/user/profile/EXAMPLE0000000000000000',
+    exampleItem: 'https://www.xiaohongshu.com/explore/EXAMPLE0000000000000001?xsec_token=xxxx',
   },
   defaultOptions: {
     outDir: '',
@@ -193,10 +160,15 @@ module.exports = {
     const opts = options || {};
     // 关掉「逐篇补全」时不必传这两个钩子，采集器自然跳过整个详情阶段
     const deep = opts.fetchNoteDetail !== false;
+    let skippedBad = 0;
     const harvester = new Harvester({
       partition: ctx.partition,
       url: normalizeHome(input),
-      parse: (data) => parseXhsResponse(data).map(toUnified),
+      parse: (data) => {
+        const r = parsePage(data);
+        skippedBad += r.skipped;
+        return r;
+      },
       wrapSSR: (arr) => ({ data: { notes: arr } }),
       onLog: log,
       onProgress: (total, added) => emit({ type: 'harvest-progress', total, added }),
@@ -204,6 +176,8 @@ module.exports = {
       detailUrlOf: deep ? noteDetailUrlOf : null,
       // 编排层随后还会按「最多作品数」截断，超出的作品补全了也会被丢掉 → 不必白跑
       detailLimit: Number(opts.maxItems) || 0,
+      // 采够就停：早先只有编排层在最后截断，采集器仍然会把整个主页滚到底（J-1）
+      maxItems: Number(opts.maxItems) || 0,
     });
     setCollector(harvester);
 
@@ -213,6 +187,7 @@ module.exports = {
     } catch (err) {
       throw new Error(`采集失败：${err.message}`);
     }
+    if (skippedBad) log(`解析时跳过 ${skippedBad} 条结构异常的数据（不影响其余作品）`);
     return { items, rootId: extractChannelId(input) };
   },
 
@@ -236,7 +211,7 @@ module.exports = {
       partition: ctx.partition,
       url,
       targetId: itemId,
-      parse: (data) => parseXhsResponse(data).map(toUnified),
+      parse: parsePage,
       wrapSSR: (arr) => ({ data: { notes: arr } }),
       onLog: log,
     });

@@ -9,11 +9,63 @@
 const fsp = require('fs/promises');
 const path = require('path');
 
+/**
+ * 两条同名 Cookie 里「更该保留」的那一条。
+ *
+ * 为什么需要挑：同一个 name 在 Electron 里可以同时存在多份（不同 path / 不同 domain），
+ * 而 `Cookie:` 请求头里同名项**只有一条有效**（服务端一般取第一条，或干脆判为异常）。
+ * 规则按「更具体优先」：
+ *   1. path 更长的更具体（`/` 之于 `/api/v2`），更能代表当前场景；
+ *   2. path 相同时过期更晚的更值得留（过期早的那条马上就要失效）；
+ *   3. 全都相同时保留**后出现**的那条 —— 调用方（`cookies.get` / 手动粘贴）都是后写的更新。
+ *
+ * `expirationDate` 缺失表示会话 Cookie（关浏览器即失效），按 0 处理：它比任何有明确
+ * 期限的都「短」，所以定期的赢。这与直觉一致：能被持久保存的那条更可能是真的登录态。
+ *
+ * @param {object} a
+ * @param {object} b
+ * @returns {object} 胜出的那一条（可能是 a，也可能是 b）
+ */
+function preferCookie(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const pathLen = (c) => String((c && c.path) || '/').length;
+  if (pathLen(a) !== pathLen(b)) return pathLen(a) > pathLen(b) ? a : b;
+  const exp = (c) => {
+    const n = Number(c && c.expirationDate);
+    return Number.isFinite(n) ? n : 0;
+  };
+  if (exp(a) !== exp(b)) return exp(a) > exp(b) ? a : b;
+  return b;
+}
+
+/**
+ * 拼 `Cookie:` 请求头 —— **按 name 去重**。
+ *
+ * 复现的缺陷（P1-9）：同一平台的持久化分区里经常同时存在
+ * `.weibo.com` 与 `passport.weibo.com` 两份 `SUB`（一个 host-only、一个域级），
+ * 早先直接 join，请求头里就出现 `SUB=a; SUB=b`。服务端要么取到过期的那条、
+ * 要么直接判为畸形 —— 表现为「界面显示已登录，接口却回未登录」。
+ *
+ * 顺序保持「首次出现」的位置：请求头的顺序对某些服务端有语义，
+ * 保持不变可以让修复前后的日志可对比。
+ *
+ * @param {Array<{name:string,value:string,path?:string,expirationDate?:number}>} cookies
+ * @returns {string}
+ */
 function joinCookies(cookies) {
-  return cookies
-    .filter((c) => c && c.name && c.value)
-    .map((c) => `${c.name}=${c.value}`)
-    .join('; ');
+  const chosen = new Map(); // name -> cookie
+  const order = [];
+  for (const c of cookies || []) {
+    if (!c || !c.name || !c.value) continue;
+    if (!chosen.has(c.name)) {
+      chosen.set(c.name, c);
+      order.push(c.name);
+      continue;
+    }
+    chosen.set(c.name, preferCookie(chosen.get(c.name), c));
+  }
+  return order.map((name) => `${name}=${chosen.get(name).value}`).join('; ');
 }
 
 /** 只挑出指定名字的 Cookie（微博抓接口时只需要这几个） */
@@ -171,6 +223,7 @@ class AuthStore {
 
 module.exports = {
   joinCookies,
+  preferCookie,
   pickNamed,
   hasAnyMark,
   hitMarks,

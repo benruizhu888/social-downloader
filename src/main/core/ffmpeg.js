@@ -84,6 +84,14 @@ function runFFmpeg(bin, args, signal) {
 
 /**
  * 把 Live Photo 动态片段转封装为 .mov
+ *
+ * ⚠️ 输出**先写临时名，成功后才 rename 到目标名**。
+ * 早先直接把 output 交给 ffmpeg：中途失败/被 kill（用户按停止、进程被杀、ffmpeg 自己崩）
+ * 都会留下一个**半截的 .mov**。下一轮 runner 用 `exists(movDest)` 判断「已转过」，
+ * 于是把它跳过 —— 用户拿到的所谓 mov 根本播不了；Live 图更惨，
+ * 连源视频都不会再下载（源文件在转换成功后会被删掉/或压根没下）。
+ * 临时名带 pid + 时间戳，避免两个并发任务撞名。
+ *
  * @param {object} opts
  * @param {string} opts.input      输入文件（mp4/mov/heic 的动态部分）
  * @param {string} opts.output     输出 .mov 路径
@@ -95,6 +103,19 @@ async function convertToMOV({ input, output, contentId, reencode = false, ffmpeg
   if (!bin) throw new Error('未找到 ffmpeg，请在设置中指定路径或安装后重试');
 
   await fsp.mkdir(path.dirname(output), { recursive: true });
+
+  /** 半成品名：与目标同目录（rename 不会跨卷），且能一眼看出是残留 */
+  const part = `${output}.part-${process.pid}-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 6)}`;
+
+  /**
+   * 任何失败/中断路径都要把半成品删掉。
+   * 删不掉（被占用）也只能算了 —— 反正它不叫 output，不会被误判成「已完成」。
+   */
+  const cleanup = async () => {
+    await fsp.unlink(part).catch(() => {});
+  };
 
   // 顺序至关重要：-i 必须紧跟输入文件，元数据只能放在输入之后、输出之前
   const inputArgs = ['-y', '-i', input];
@@ -115,10 +136,16 @@ async function convertToMOV({ input, output, contentId, reencode = false, ffmpeg
   if (!reencode) {
     const copyOut = ['-c:v', 'copy', '-c:a', 'copy', '-movflags', movFlags, '-f', 'mov'];
     try {
-      await runFFmpeg(bin, [...inputArgs, ...meta, ...copyOut, output], signal);
+      await runFFmpeg(bin, [...inputArgs, ...meta, ...copyOut, part], signal);
+      await fsp.rename(part, output);
       return { mode: 'copy' };
     } catch {
-      /* 封装失败（例如源是 hevc 或带特殊流），落到重编码 */
+      /**
+       * 封装失败（例如源是 hevc 或带特殊流），落到重编码。
+       * 这里必须先清掉可能残留的半成品：重编码虽然会 -y 覆盖，但一旦重编码
+       * 也失败，留下的是「上一次失败的半截文件」，两者混在一起很难查。
+       */
+      await cleanup();
     }
   }
 
@@ -133,8 +160,14 @@ async function convertToMOV({ input, output, contentId, reencode = false, ffmpeg
     '-movflags', movFlags,
     '-f', 'mov',
   ];
-  await runFFmpeg(bin, [...inputArgs, ...meta, ...encodeOut, output], signal);
-  return { mode: 'encode' };
+  try {
+    await runFFmpeg(bin, [...inputArgs, ...meta, ...encodeOut, part], signal);
+    await fsp.rename(part, output);
+    return { mode: 'encode' };
+  } catch (err) {
+    await cleanup();
+    throw err;
+  }
 }
 
 /** 从静态图提取尺寸（Live Photo 配对时用于校验，可选） */

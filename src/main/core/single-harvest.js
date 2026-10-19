@@ -28,7 +28,9 @@ const { attachUrlGuards } = require('../url-guard');
 const { SSR_BUNDLE_JS } = require('./ssr-walk');
 const { harvestArguments } = require('../../preload/harvest-match');
 /** 媒体完整度打分复用列表采集器那一份 —— 「同一件事只有一份实现」 */
-const { mediaScore } = require('./harvester');
+const { mediaScore, normalizePage } = require('./harvester');
+/** 窗口池：同一个平台连下多条时复用隐藏窗口，省掉「建窗 → 握手 → 销毁」的开销 */
+const { getPool } = require('./browser-pool');
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -46,6 +48,7 @@ class SingleHarvester {
    * @param {Function} [opts.onLog]
    * @param {number}   [opts.timeoutMs=30000] 单轮等待上限
    * @param {number}   [opts.pollMs=700]      轮询间隔
+   * @param {number}   [opts.quietRounds=3]   连续多少轮「媒体完整度没再增长」就收工
    * @param {boolean}  [opts.showWindow=false]
    */
   constructor({
@@ -58,6 +61,7 @@ class SingleHarvester {
     onLog,
     timeoutMs = 30000,
     pollMs = 700,
+    quietRounds = 3,
     showWindow = false,
   }) {
     this.partition = partition;
@@ -67,6 +71,16 @@ class SingleHarvester {
     this.onLog = onLog || (() => {});
     this.timeoutMs = timeoutMs;
     this.pollMs = pollMs;
+    /**
+     * 「媒体完整度连续几轮不再增长就收工」。
+     *
+     * 为什么要它（J-3）：早先的判据是「items.size > 0」—— 只要解析出一条就算完。
+     * 但详情页的数据是**分几次**填进来的：先出现 1 张封面，1~2 秒后才补上完整图集。
+     * 于是「一出现就收工」等于只下到封面，而这正是「图集补全成功 0」那类问题的另一种形态。
+     * 现在改成看**完整度分数**（mediaScore：视频/实况权重 3）连续 3 轮不变才收工，
+     * 3 轮 × 700ms ≈ 2.1 秒，足够让后续数据落定，又不会白等 30 秒。
+     */
+    this.quietRounds = quietRounds;
     this.showWindow = !!showWindow;
 
     /** 严格匹配用的 id 集合 */
@@ -78,23 +92,40 @@ class SingleHarvester {
     this.ssrHits = 0; // 「翻到了数据」的次数
     this.ssrError = ''; // 取到了却没带回来的原因（诊断用）
     this.skippedForeign = 0; // 被 id 过滤挡掉的「别人的作品」条数
+    this.parseSkipped = 0; // 解析时被逐条容错跳过的脏数据条数（P1-5）
     this.win = null;
     this.stopped = false;
+    /** 这个窗口是从窗口池借来的（close 时要「还」而不是「销毁」） */
+    this._pooled = false;
+  }
+
+  /** 当前已解析到的「最完整那一份」的完整度分（见 quietRounds 的注释） */
+  _score() {
+    let best = 0;
+    for (const it of this.items.values()) {
+      const s = mediaScore(it);
+      if (s > best) best = s;
+    }
+    return best;
   }
 
   /** 主进程转发截获数据用（与 Harvester 同名同签名） */
   ingest(url, data) {
     if (!data || typeof data !== 'object') return 0;
     this.intercepted++;
-    let list = [];
+    let page;
     try {
-      list = this.parse(data) || [];
+      page = normalizePage(this.parse(data));
     } catch (err) {
       this.onLog(`解析响应失败：${err.message}`);
       return 0;
     }
+    if (page.skipped) {
+      this.parseSkipped += page.skipped;
+      this.onLog(`解析时跳过 ${page.skipped} 条结构异常的数据（不影响目标作品）`);
+    }
     let added = 0;
-    for (const it of list) {
+    for (const it of page.items) {
       if (!it || !it.id) continue;
       const id = String(it.id);
       if (this.want.size && !this.want.has(id)) {
@@ -139,14 +170,41 @@ class SingleHarvester {
     await sleep(1200);
   }
 
-  /** 轮询直到目标作品出现 */
+  /**
+   * 轮询直到「目标作品的数据稳定下来」。
+   *
+   * 两个退出条件（J-3）：
+   *   · 已经拿到过数据，且完整度连续 `quietRounds` 轮没再增长 → 收工（正常路径，约 2 秒）；
+   *   · 到时间上限还没拿到任何数据 → 退出（由调用方判断「没采到」并出诊断）。
+   *
+   * ⚠️ 注意「拿到数据」这条前置条件：只在有数据时才允许按 quiet 收工。
+   * 否则慢网下前三轮（2.1 秒）全都空着，就会把「页面还没加载完」误判成「没有这篇」。
+   */
   async _waitForTarget(deadline, label) {
-    while (!this.stopped && Date.now() < deadline && this.items.size === 0) {
+    let lastScore = 0;
+    let quiet = 0;
+    while (!this.stopped && Date.now() < deadline) {
       if (!this.win || this.win.isDestroyed()) break;
       await sleep(this.pollMs);
       await this._harvestSSR();
+
+      const score = this._score();
+      if (score > lastScore) {
+        lastScore = score;
+        quiet = 0;
+        // 有新东西进来就继续等，直到稳定
+        continue;
+      }
+      if (score > 0) {
+        quiet++;
+        if (quiet >= this.quietRounds) break;
+      }
     }
-    if (this.items.size) this.onLog(`${label}取到作品数据（共 ${this.items.size} 条媒体条目）`);
+    if (this.items.size) {
+      this.onLog(
+        `${label}取到作品数据（${this._score()} 分 / ${this.items.size} 条媒体条目）`
+      );
+    }
   }
 
   /** 一条都没采到时的现场报告（沿用列表采集器的思路：把可观测事实都摆出来） */
@@ -185,28 +243,51 @@ class SingleHarvester {
   }
 
   async start() {
-    this.win = new BrowserWindow({
-      show: this.showWindow,
-      width: 1366,
-      height: 900,
-      webPreferences: {
-        partition: this.partition,
-        preload: path.join(__dirname, '..', '..', 'preload', 'harvest-preload.js'),
-        // 与列表采集窗同一取舍：注入脚本必须与页面脚本同处一个 JS 世界，
-        // 否则包装不了页面的 fetch/XHR，截获全部落空。详见 harvester.js 的同名注释。
-        contextIsolation: false,
-        nodeIntegration: false,
-        backgroundThrottling: false,
-        // 单作品模式要放行详情接口（/aweme/v1/web/aweme/detail、sns/web/v1/feed）
-        additionalArguments: harvestArguments({ single: true }),
-      },
+    /**
+     * 窗口从池里借，而不是每条链接新建（J-3）。
+     *
+     * 批量下载 100 条链接时，旧写法是「建窗 → 加载 → 销毁」×100：
+     * 每个窗口都要重新起一个渲染进程、重新解析 preload，销毁还是异步的；
+     * 短时间反复建/毁会把 GPU 进程也拖着反复重启。复用之后，第二条链接
+     * 起几乎就是一次 loadURL。
+     * 复用键带上了 partition 与 mode，绝不会出现「微博的 Cookie 进了小红书
+     * 的页面」「列表模式的接口白名单套到详情页上」这类串味（见 browser-pool.js）。
+     */
+    this.win = getPool().acquire({
+      partition: this.partition,
+      mode: 'single',
+      create: () =>
+        new BrowserWindow({
+          show: this.showWindow,
+          width: 1366,
+          height: 900,
+          webPreferences: {
+            partition: this.partition,
+            preload: path.join(__dirname, '..', '..', 'preload', 'harvest-preload.js'),
+            // 与列表采集窗同一取舍：注入脚本必须与页面脚本同处一个 JS 世界，
+            // 否则包装不了页面的 fetch/XHR，截获全部落空。详见 harvester.js 的同名注释。
+            contextIsolation: false,
+            nodeIntegration: false,
+            backgroundThrottling: false,
+            // 单作品模式要放行详情接口（/aweme/v1/web/aweme/detail、sns/web/v1/feed）
+            additionalArguments: harvestArguments({ single: true }),
+          },
+        }),
     });
 
-    // 作品页里「打开 App 看更多」这类深链比主页还密集，护栏必须挂
-    attachUrlGuards(this.win.webContents, {
-      log: (m) => this.onLog(m),
-      notifyWebOpen: false,
-    });
+    /**
+     * 护栏只在**第一次**拿到这个窗口时挂。
+     * 窗口是复用的，而 `attachUrlGuards` 里有多条 `webContents.on(...)`：
+     * 每条链接都挂一次，监听器会越叠越多（第 30 条链接时同一个事件会被跑 30 遍）。
+     */
+    if (!this.win.__sdGuarded) {
+      this.win.__sdGuarded = true;
+      // 作品页里「打开 App 看更多」这类深链比主页还密集，护栏必须挂
+      attachUrlGuards(this.win.webContents, {
+        log: (m) => this.onLog(m),
+        notifyWebOpen: false,
+      });
+    }
 
     this.onLog(`正在打开作品页：${this.url}`);
     await this._load();
@@ -246,11 +327,19 @@ class SingleHarvester {
     this.stopped = true;
   }
 
+  /**
+   * 归还窗口，而不是销毁它（J-3）。
+   * 池子会在空闲 60 秒后自动销毁；期间下一条链接可以直接捡回来用。
+   * 只有窗口已经在销毁中（`isDestroyed()`）才真的什么都不做 —— 池子自己会清理账本。
+   */
   close() {
-    if (this.win && !this.win.isDestroyed()) {
-      this.win.destroy();
-      this.win = null;
+    if (!this.win) return;
+    try {
+      getPool().release(this.win);
+    } catch {
+      /* 还回去失败最多是不复用，不能影响本次结果 */
     }
+    this.win = null;
   }
 }
 

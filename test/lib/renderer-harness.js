@@ -61,6 +61,48 @@ class MockNode {
     this.scrollHeight = 0;
     this.clientHeight = 0;
     this.fragment = false;
+    this.disabled = false;
+    /**
+     * id 的注册回调，由脚手架注入（见 createHarness 的 makeNode）。
+     *
+     * 为什么需要它：`renderOptions()` / `rerenderLog()` 都是**运行期**用
+     * createElement 建节点再赋值 `.id`。早先 byId 只装 index.html 里的静态 id，
+     * 于是 `$('opt_downloadImages')` 恒为 null —— `collectCurrent()` 静默读不到选项，
+     * 测试却全绿（它断言的是「不抛异常」）。真实的 getElementById 能找到任何在文档树里的节点，
+     * 替身必须一样能找到，否则替身本身就在骗人。
+     */
+    this._sink = null;
+    this._id = '';
+    /**
+     * 所在 document 的引用，由 makeNode 注入。
+     * 焦点管理（focus / document.activeElement / 弹窗焦点归还）需要它 ——
+     * 替身里没有焦点概念时，「关闭弹窗后焦点回不去」这类问题根本无法被断言。
+     */
+    this._doc = null;
+  }
+  /**
+   * 聚焦。真实浏览器的两个副作用这里都还原：
+   *   · document.activeElement 指向该元素；
+   *   · 上一个焦点元素收到 blur。
+   * 只读不算「有焦点」：Tab 循环判据就是 activeElement。
+   */
+  focus() {
+    const doc = this._doc;
+    if (!doc) return;
+    const prev = doc.activeElement;
+    if (prev && prev !== this) prev.blur();
+    doc.activeElement = this;
+  }
+  blur() {
+    const doc = this._doc;
+    if (doc && doc.activeElement === this) doc.activeElement = doc.body || null;
+  }
+  /** 渲染后才有 offsetParent（display:none / 未挂载时为 null）——焦点陷阱要过滤掉隐藏元素 */
+  get offsetParent() { return this.isConnected(this._doc && this._doc.body) ? this.parentNode : null; }
+  get id() { return this._id; }
+  set id(v) {
+    this._id = String(v == null ? '' : v);
+    if (this._id && typeof this._sink === 'function') this._sink(this._id, this);
   }
   get className() { return [...this.classList.set].join(' '); }
   set className(v) { this.classList.set = new Set(String(v).split(/\s+/).filter(Boolean)); }
@@ -69,9 +111,26 @@ class MockNode {
   get childElementCount() { return this.children.length; }
   get firstElementChild() { return this.children[0] || null; }
   get textContent() { return this._text || this._rawText; }
-  set textContent(v) { this._text = String(v); this._rawText = ''; this.children = []; }
-  set innerHTML(_v) { this.children = []; this._text = ''; }
+  set textContent(v) {
+    this._text = String(v);
+    this._rawText = '';
+    this._detachChildren();
+  }
+  set innerHTML(_v) {
+    this._detachChildren();
+    this._text = '';
+  }
   get innerHTML() { return ''; }
+  /**
+   * 清空子节点时必须**同时断开 parentNode**。
+   * 只清数组的话，被清掉的节点仍能沿 parentNode 走回文档树 ——
+   * `closest()` 与「是否真的在文档里」的判断都会被骗，
+   * 于是「从界面上删掉的节点」还会被当成活的（真机上是不会的）。
+   */
+  _detachChildren() {
+    for (const c of this.children) c.parentNode = null;
+    this.children = [];
+  }
   appendChild(n) {
     if (!n) return n;
     if (n.fragment) {
@@ -106,6 +165,30 @@ class MockNode {
   }
   getBoundingClientRect() { return { width: 100, height: 20, left: 0, top: 0 }; }
   /**
+   * 事件委托的前提：从自己往上找最近一个匹配的祖先（含自身）。
+   *
+   * 产品代码里到处是 `e.target.closest('.tab')` 这种写法（选项卡、日志级别筛选）：
+   * 没有 closest 就只能让测试直接对父节点 fire，于是「点到了子元素还能不能切平台」
+   * 这条最真实的行为永远测不到。
+   */
+  closest(sel) {
+    let node = this;
+    while (node) {
+      if (node.tagName !== '#TEXT' && matchesAny(node, sel)) return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+  /** 是否仍挂在文档树上（用于 getElementById 判断「这是不是活着的节点」） */
+  isConnected(root) {
+    let node = this;
+    while (node) {
+      if (node === root) return true;
+      node = node.parentNode;
+    }
+    return false;
+  }
+  /**
    * 选择器查询限定在**自己这棵子树**里，与真实 DOM 一致。
    *
    * 早先这里是在全局节点表上筛，于是 `box.querySelector('.log-empty')` 会命中
@@ -126,8 +209,39 @@ class MockNode {
     walk(this);
     return out;
   }
-  /** 触发已注册的监听器（测试用） */
-  fire(type, ev) { (this.listeners[type] || []).slice().forEach((fn) => fn(ev || {})); }
+  /**
+   * 派发事件（测试用）。
+   *
+   * 与浏览器对齐的三件事，缺一条就会得出相反的结论：
+   *   ① 从 target 往上一路冒泡到 body，`target` 始终是最初那个节点，
+   *      `currentTarget` 随正在执行的节点变化（事件委托全靠它）；
+   *   ② `ev.stopPropagation()` 能中断后续祖先，否则「委托 + 停止冒泡」的写法测不了；
+   *   ③ `disabled` 的元素不触发 click（自身监听器不跑、也不向上冒泡）——
+   *      这正是「运行中按钮点不动」这类行为的判据。
+   */
+  fire(type, ev) {
+    const evt = ev || {};
+    if (!evt.target) evt.target = this;
+    if (!evt.type) evt.type = type;
+    let stopped = false;
+    /**
+     * 真实事件对象一定带 preventDefault / stopPropagation。
+     * 缺了它，「Tab 循环自己接管焦点」这类代码只能在真机上跑通、测试里一碰就抛
+     * TypeError —— 于是没人敢写、也没有对应的测试。
+     */
+    if (typeof evt.preventDefault !== 'function') evt.preventDefault = () => {};
+    if (typeof evt.stopPropagation !== 'function') evt.stopPropagation = () => { stopped = true; };
+    // 浏览器：disabled 表单控件上不会产生 click，事件也不会从它冒泡出去
+    if (type === 'click' && this.disabled) return evt;
+    let node = this;
+    while (node && !stopped) {
+      evt.currentTarget = node;
+      const list = (node.listeners[type] || []).slice();
+      for (const fn of list) fn(evt);
+      node = node.parentNode;
+    }
+    return evt;
+  }
   /**
    * 递归取出全部后代文本（含从 index.html 解析出来的静态文案）。
    * 注意 textContent 的 setter 会把 _text 设上并清空 children，所以一个节点可能
@@ -195,8 +309,9 @@ const DEFAULT_PLATFORMS = [
     inputMeta: {
       placeholder: 'p3',
       hint: 'h3',
-      exampleProfile: 'https://www.xiaohongshu.com/user/profile/XHS_USER_ID_PLACEHOLDER',
-      exampleItem: 'https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER?xsec_token=XHS_XSEC_TOKEN_PLACEHOLDER',
+      // 示例值：非真实博主/笔记
+      exampleProfile: 'https://www.xiaohongshu.com/user/profile/EXAMPLE0000000000000000',
+      exampleItem: 'https://www.xiaohongshu.com/explore/EXAMPLE0000000000000001?xsec_token=xxxx',
     },
     needsBrowserHarvest: true,
     supportsOriginalImage: true, supportsLivePhoto: true,
@@ -207,7 +322,7 @@ const DEFAULT_PLATFORMS = [
     inputMeta: {
       placeholder: 'p2',
       hint: 'h2',
-      exampleProfile: 'https://www.douyin.com/user/DOUYIN_SEC_UID_PLACEHOLDER',
+      exampleProfile: 'https://www.douyin.com/user/MS4wLjABAAAAxxxxxxxx',
       exampleItem: 'https://www.douyin.com/video/7300000000000000000',
     },
     needsBrowserHarvest: true,
@@ -231,6 +346,23 @@ function createHarness(opts = {}) {
   const allNodes = [];
 
   const queryAll = (sel) => allNodes.filter((el) => el.tagName !== '#TEXT' && matchesAny(el, sel));
+  // document 字面量里建的 body 早于 documentRef 赋值，这里补挂一次
+  const sealDocument = (doc) => {
+    documentRef = doc;
+    if (doc.body) doc.body._doc = doc;
+  };
+
+  /** document 自身的引用（在 document 字面量建好后再回填，见下方 documentRef = document） */
+  let documentRef = null;
+
+  /** 建节点时必须挂上 id 注册回调，否则运行期 `el.id = 'opt_x'` 不会被 getElementById 看到 */
+  const makeNode = (tag) => {
+    const el = new MockNode(tag);
+    el._sink = (id, node) => byId.set(id, node);
+    // 回指 document：focus()/blur() 与 offsetParent 都依赖它（见 MockNode 的注释）
+    el._doc = documentRef;
+    return el;
+  };
 
   /**
    * 按真实嵌套关系把 index.html 建成一棵树（而不是一张扁平的节点表）。
@@ -239,33 +371,79 @@ function createHarness(opts = {}) {
    * 结构规整，用一个栈式解析器足够，不需要引入 HTML 解析库。
    */
   const VOID_TAGS = new Set(['meta', 'link', 'input', 'br', 'img', 'hr', 'area', 'base', 'col', 'embed', 'source', 'track', 'wbr']);
+  const docListeners = {};
   const document = {
-    body: new MockNode('body'),
-    getElementById: (id) => byId.get(id) || null,
+    body: makeNode('body'),
+    /**
+     * 焦点所在元素。
+     * 弹窗的「打开时聚焦输入框 / 关闭后焦点归还 / Tab 循环」三件事都以它为判据，
+     * 替身里没有 activeElement 时这些行为一条都断言不了。
+     */
+    activeElement: null,
+    /** 节点是否仍在文档树里（弹窗关掉后判断「焦点目标还在不在」要用） */
+    contains(node) {
+      return !!(node && node.isConnected(this.body));
+    },
+    /** document 级监听（Esc 关闭弹窗这类全局快捷键） */
+    addEventListener(type, fn) { (docListeners[type] = docListeners[type] || []).push(fn); },
+    removeEventListener(type, fn) {
+      const a = docListeners[type] || [];
+      const i = a.indexOf(fn);
+      if (i >= 0) a.splice(i, 1);
+    },
+    /**
+     * getElementById：先看注册表（运行期赋 id 的节点会立刻登记），
+     * 但只认「还挂在文档树上」的那一个；不在文档里就按树重新找一遍。
+     *
+     * 为什么不能只查注册表：`renderOptions()` 每次都 `box.innerHTML = ''` 重建，
+     * 旧节点留在注册表里但已经脱离文档。只查表会让 `collectCurrent()` 读到
+     * **已从界面消失的**那个复选框 —— 测试全绿、真机读到的是另一份数据。
+     */
+    getElementById: (id) => {
+      const hit = byId.get(id);
+      if (hit && hit.isConnected(document.body)) return hit;
+      const walk = (n) => {
+        for (const c of n.children) {
+          if (c.id === id) return c;
+          const r = walk(c);
+          if (r) return r;
+        }
+        return null;
+      };
+      const found = walk(document.body);
+      if (found) {
+        byId.set(id, found);
+        return found;
+      }
+      // 既不注册也不在树上：只有「刚 createElement、还没 append」这一种可能，
+      // 浏览器会给 null，这里容错返回，避免测试在 append 之前取不到节点
+      return hit || null;
+    },
     createElement: (tag) => {
-      const el = new MockNode(tag);
+      const el = makeNode(tag);
       allNodes.push(el);
       return el;
     },
     createTextNode: (s) => {
-      const el = new MockNode('#text');
+      const el = makeNode('#text');
       el.textContent = s;
       return el;
     },
     createDocumentFragment: () => {
-      const el = new MockNode('#fragment');
+      const el = makeNode('#fragment');
       el.fragment = true;
       return el;
     },
     querySelector: (sel) => queryAll(sel)[0] || null,
     querySelectorAll: (sel) => queryAll(sel),
   };
+  sealDocument(document);
 
   (function buildTree() {
     const src = html
       .replace(/<!--[\s\S]*?-->/g, '')
       .replace(/<!DOCTYPE[^>]*>/gi, '');
-    const rootTag = new MockNode('#root');
+    const rootTag = makeNode('#root');
     const stack = [rootTag];
     const re = /<(\/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
     let m;
@@ -289,18 +467,17 @@ function createHarness(opts = {}) {
         }
         continue;
       }
-      const el = new MockNode(tag);
+      const el = makeNode(tag);
       const cls = (attrs.match(/\bclass="([^"]*)"/) || [])[1];
       if (cls) el.className = cls;
       const id = (attrs.match(/\bid="([^"]*)"/) || [])[1];
-      if (id) {
-        el.id = id;
-        byId.set(id, el);
-      }
+      if (id) el.id = id;
       for (const a of attrs.matchAll(/\bdata-([\w-]+)="([^"]*)"/g)) {
         el.dataset[a[1].replace(/-([a-z])/g, (_x, c) => c.toUpperCase())] = a[2];
       }
       if (/\bhidden\b(\s|>|=|$)/.test(attrs)) el.hidden = true;
+      // disabled 也要从静态 HTML 读出来（停止按钮初始就是禁用的）
+      if (/\bdisabled\b(\s|>|=|$)/.test(attrs)) el.disabled = true;
       stack[stack.length - 1].appendChild(el);
       registry.push(el);
       if (!VOID_TAGS.has(tag) && !/\/\s*$/.test(attrs)) stack.push(el);
@@ -333,6 +510,38 @@ function createHarness(opts = {}) {
   const now = () => FakeDate.now();
   const advance = (ms) => { clockOffset += ms; };
 
+  /* --------- 可泵的 setInterval --------- */
+  /**
+   * 真实的 setInterval 在测试里只会让用例多等一秒（而心跳本来就是按秒推进统计的），
+   * 所以改成「注册起来、由 h.tick(ms) 推进」。
+   * 这也让「运行中每秒刷新已用/剩余」这条行为第一次可以被断言。
+   */
+  const intervals = new Map();
+  let intervalSeq = 0;
+  const clearAllIntervals = () => intervals.clear();
+  /**
+   * 推进虚拟时钟并触发到期的 interval 回调（每个 interval 每 tick **一次**）。
+   * 只补一次而不是把积压的周期全跑一遍：一次 tick 想跑 10 个周期没有任何测试价值，
+   * 却能把一个死循环放大成卡死。
+   */
+  const tick = (ms = 0) => {
+    if (ms > 0) clockOffset += ms;
+    const at = now();
+    const due = [...intervals.entries()]
+      .filter(([, it]) => it.next <= at)
+      .sort((a, b) => a[1].next - b[1].next);
+    for (const [id, it] of due) {
+      if (!intervals.has(id)) continue; // 回调里被 clearInterval 掉了
+      it.next = at + it.ms;
+      try {
+        it.fn();
+      } catch {
+        /* 定时器回调抛错不该炸掉测试进程（真实浏览器里也是孤立的一次） */
+      }
+    }
+    return at;
+  };
+
   /* --------- IPC 桩 --------- */
   const copied = [];
   let inspectResult = { mode: 'profile' };
@@ -343,29 +552,55 @@ function createHarness(opts = {}) {
   const platforms = opts.platforms || DEFAULT_PLATFORMS;
 
   const windowObj = { __ui: null, __handler: null, __events: [] };
-  windowObj.api = Object.assign({
-    info: async () => ({ version: '1.1.0-test', defaultPlatform: platforms[0].id, platforms }),
-    getSettings: async () => settings,
-    setSettings: async (patch) => Object.assign(settings, patch || {}),
-    checkFFmpeg: async () => ({ ok: true, version: '6.0' }),
-    authStatus: async () => ({ loggedIn: true, marks: ['SUB'], detail: 'ok', weakSeen: [], loginWindowURL: 'https://weibo.com/u/1' }),
-    onEvent: (cb) => { windowObj.__handler = cb; },
-    inspectInput: async () => inspectResult,
-    copyText: async (t) => { copied.push(t); },
-    openLogin: () => {}, logout: async () => {}, openSite: async () => {},
-    chooseDir: async () => '', openFolder: () => {}, exportLog: async () => ({ filePath: 'C:\\a.log' }),
-    setCookie: async () => {}, start: async () => ({}), stop: async () => {},
-  }, opts.api || {});
+  /**
+   * `omitApi: true` 用来模拟「预加载脚本没注入」——
+   * 这正是 P0-5 里最尴尬的形态：界面能开，但点什么都无声无息。
+   */
+  if (!opts.omitApi) {
+    windowObj.api = Object.assign({
+      info: async () => ({ version: '1.1.0-test', defaultPlatform: platforms[0].id, platforms }),
+      getSettings: async () => settings,
+      setSettings: async (patch) => Object.assign(settings, patch || {}),
+      checkFFmpeg: async () => ({ ok: true, version: '6.0' }),
+      authStatus: async () => ({ loggedIn: true, marks: ['SUB'], detail: 'ok', weakSeen: [], loginWindowURL: 'https://weibo.com/u/1' }),
+      onEvent: (cb) => { windowObj.__handler = cb; },
+      inspectInput: async () => inspectResult,
+      copyText: async (t) => { copied.push(t); },
+      openLogin: () => {}, logout: async () => {}, openSite: async () => {},
+      chooseDir: async () => '', openFolder: () => {}, exportLog: async () => ({ filePath: 'C:\\a.log' }),
+      setCookie: async () => {}, start: async () => ({}), stop: async () => {},
+    }, opts.api || {});
+  }
 
   const sandbox = {
     console, document, window: windowObj,
+    /** 启动失败横幅的「重试」按钮走 location.reload()，测试里只记账、不真的刷新 */
+    location: {
+      reload: () => {
+        windowObj.__reloads = (windowObj.__reloads || 0) + 1;
+      },
+    },
     performance: { now: () => now() },
     requestAnimationFrame: (cb) => { rafQueue.push(cb); return ++rafSeq; },
     cancelAnimationFrame: () => {},
     setTimeout, clearTimeout,
-    setInterval: () => 1, clearInterval: () => {},
+    setInterval: (fn, ms) => {
+      const id = ++intervalSeq;
+      const period = Math.max(1, Number(ms) || 1);
+      intervals.set(id, { fn, ms: period, next: now() + period });
+      return id;
+    },
+    clearInterval: (id) => { intervals.delete(id); },
     Date: FakeDate, Math, JSON, Number, String, Boolean, Array, Object, RegExp, Error, Promise,
     isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent,
+    /**
+     * 浏览器里本来就有的两个构造器。替身沙箱默认只给「最小可用集」，
+     * 少一个就会让渲染层走 catch 分支而测试看不出来 ——
+     * 例如 siteHostOf() 用 new URL() 取域名，缺了 URL 就会静默退回平台名，
+     * 于是「登录区显示当前网站」这个功能在测试里永远显示不出来，
+     * 而在真机上却是好的。替身必须与真机环境对齐，不能让测试比真实环境更严苛。
+     */
+    URL, URLSearchParams,
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
@@ -384,9 +619,20 @@ function createHarness(opts = {}) {
     document,
     windowObj,
     byId,
-    el: (id) => byId.get(id) || null,
-    txt: (id) => (byId.get(id) ? byId.get(id).textContent : undefined),
+    el: (id) => document.getElementById(id),
+    txt: (id) => (document.getElementById(id) ? document.getElementById(id).textContent : undefined),
     ui: () => windowObj.__ui,
+    /**
+     * 派发一个 document 级事件（Esc 关闭弹窗这类全局快捷键）。
+     * 直接走 listeners 而不是 fire()：document 不是节点，没有冒泡链。
+     */
+    fireDoc: (type, ev = {}) => {
+      const evt = Object.assign({ type, preventDefault() {}, stopPropagation() {} }, ev);
+      for (const fn of (docListeners[type] || []).slice()) fn(evt);
+      return evt;
+    },
+    /** 当前焦点所在元素（配合 el.focus() 断言「关闭弹窗后焦点回没回去」） */
+    activeEl: () => document.activeElement,
     /** 派发一条主进程事件；同时留档，便于断言「发过什么」 */
     H: (ev) => {
       windowObj.__events.push(ev);
@@ -400,6 +646,18 @@ function createHarness(opts = {}) {
     pumpFrames,
     pendingRaf,
     advance,
+    tick,
+    intervals,
+    clearAllIntervals,
+    /** 设置滚动相关尺寸（日志跟随/上翻暂停这类行为靠它才测得动） */
+    setScroll: (id, v = {}) => {
+      const el = document.getElementById(id);
+      if (!el) return null;
+      for (const k of ['scrollTop', 'scrollHeight', 'clientHeight']) {
+        if (v[k] !== undefined) el[k] = v[k];
+      }
+      return el;
+    },
     now,
     MockNode,
   };

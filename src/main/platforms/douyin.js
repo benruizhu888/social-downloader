@@ -7,65 +7,20 @@
  */
 const { Harvester } = require('../core/harvester');
 const { SingleHarvester } = require('../core/single-harvest');
-const { parseDouyinResponse } = require('../sources/parsers/douyin');
+const { parseDouyinResponse, parseDouyinResponseDetailed, hasMore: pageHasMore } = require('../sources/parsers/douyin');
 const { douyinInputProblem } = require('../url-parse');
+const { normalizeHome, makeExtractChannelId, makeToUnified } = require('./common');
 
 /** 从主页链接里提取 sec_uid，用于建目录 */
-function extractChannelId(input) {
-  const s = String(input || '');
-  const m = s.match(/\/user\/([A-Za-z0-9_-]+)/);
-  if (m) return m[1];
-  const m2 = s.match(/[?&]sec_uid=([A-Za-z0-9_-]+)/);
-  if (m2) return m2[1];
-  return 'unknown';
-}
+const extractChannelId = makeExtractChannelId([/\/user\/([A-Za-z0-9_-]+)/, /[?&]sec_uid=([A-Za-z0-9_-]+)/]);
 
-function normalizeHome(input) {
-  const s = String(input || '').trim();
-  return /^https?:\/\//i.test(s) ? s : 'https://' + s;
-}
-
-function toUnified(it) {
-  const medias = [];
-  for (const m of it.medias || []) {
-    if (m.kind === 'image') {
-      medias.push({
-        kind: 'image',
-        url: m.url,
-        candidates: [m.url, ...(m.altUrls || [])],
-        ext: m.ext || 'jpg',
-      });
-    } else if (m.kind === 'livephoto') {
-      medias.push({
-        kind: 'livephoto',
-        url: m.url,
-        altUrls: [],
-        ext: 'mp4',
-        cover: m.cover || null,
-        coverCandidates: m.cover ? [m.cover, ...(m.altUrls || [])] : [],
-      });
-    } else if (m.kind === 'video') {
-      medias.push({
-        kind: 'video',
-        url: m.url,
-        ext: m.ext || 'mp4',
-        cover: m.cover || null,
-        coverCandidates: m.cover ? [m.cover] : [],
-      });
-    }
-  }
-  return {
-    id: it.id,
-    title: it.title || '',
-    dateHint: it.createdAt || '',
-    filePrefix: '',
-    folderTitle: it.title || '',
-    author: it.author || '',
-    authorUid: it.authorUid || '',
-    likeCount: it.likeCount,
-    medias,
-  };
-}
+/**
+ * 统一模型映射（公共部分在 platforms/common.js）。
+ * 抖音特有字段只有 `authorUid` —— 它是把「喜欢 / 推荐」里的别人作品挡在外面的唯一依据。
+ */
+const toUnified = makeToUnified({
+  extra: (it) => ({ authorUid: it.authorUid || '' }),
+});
 
 /**
  * 只保留「目标博主本人发布的作品」。
@@ -97,6 +52,31 @@ function itemsForChannel(data, targetUid) {
     kept.push(it);
   }
   return { items: kept, dropped };
+}
+
+/**
+ * 采集器用的「一页解析」：items / 跳过条数 / 是否还有下一页。
+ *
+ * `itemsForChannel` 仍然复用同一个解析层（保证「过滤」与「解析」看到的是同一份数据），
+ * 只是把统计信息一并带出来：skipped 让日志能说「跳过 N 条结构异常的数据」，
+ * hasMore 让采集循环在页面自己说没有下一页时立刻收工（J-1）。
+ */
+function parsePage(data, targetUid) {
+  const r = parseDouyinResponseDetailed(data);
+  if (!targetUid || targetUid === 'unknown') {
+    return { items: r.items.map(toUnified), skipped: r.skipped, hasMore: pageHasMore(data), dropped: 0 };
+  }
+  const kept = [];
+  let dropped = 0;
+  for (const it of r.items) {
+    // authorUid 缺失时不做判断（宁可保留，也不能因为字段缺失就整批丢掉）
+    if (it.authorUid && it.authorUid !== targetUid) {
+      dropped++;
+      continue;
+    }
+    kept.push(it);
+  }
+  return { items: kept.map(toUnified), skipped: r.skipped, hasMore: pageHasMore(data), dropped };
 }
 
 module.exports = {
@@ -136,7 +116,7 @@ module.exports = {
   inputMeta: {
     placeholder: '粘贴抖音博主主页链接，或单个作品链接',
     hint: '抖音：主页链接批量下载；单个作品链接（douyin.com/video/… 或 v.douyin.com 短链）只下载这一条。采集靠内置浏览器滚动加载，必须先登录。',
-    exampleProfile: 'https://www.douyin.com/user/DOUYIN_SEC_UID_PLACEHOLDER',
+    exampleProfile: 'https://www.douyin.com/user/MS4wLjABAAAAxxxxxxxx',
     exampleItem: 'https://www.douyin.com/video/7300000000000000000',
   },
   defaultOptions: {
@@ -182,7 +162,7 @@ module.exports = {
     return problem ? { problem } : null;
   },
 
-  async collectItems({ input, ctx, emit, log, setCollector }) {
+  async collectItems({ input, ctx, emit, log, setCollector, options }) {
     /**
      * 守门：抖音的搜索页 / 信息流页不可能是某位博主的主页。
      *
@@ -197,17 +177,20 @@ module.exports = {
 
     const targetUid = extractChannelId(input);
     let droppedForeign = 0;
+    let skippedBad = 0;
     const harvester = new Harvester({
       partition: ctx.partition,
       url: normalizeHome(input),
       parse: (data) => {
-        const r = itemsForChannel(data, targetUid);
+        const r = parsePage(data, targetUid);
         droppedForeign += r.dropped;
-        return r.items.map(toUnified);
+        skippedBad += r.skipped;
+        return r;
       },
       wrapSSR: (arr) => ({ aweme_list: arr }),
       onLog: log,
       onProgress: (total, added) => emit({ type: 'harvest-progress', total, added }),
+      maxItems: Number((options && options.maxItems) || 0),
     });
     setCollector(harvester);
 
@@ -221,6 +204,7 @@ module.exports = {
     if (droppedForeign) {
       log(`已忽略 ${droppedForeign} 条非本博主的作品（点赞 / 推荐 / 合集等，不属于主页作品）`);
     }
+    if (skippedBad) log(`解析时跳过 ${skippedBad} 条结构异常的数据（不影响其余作品）`);
     return { items, rootId: targetUid };
   },
 
@@ -240,7 +224,7 @@ module.exports = {
       partition: ctx.partition,
       url,
       targetId: itemId,
-      parse: (data) => parseDouyinResponse(data).map(toUnified),
+      parse: (data) => parsePage(data, ''),
       wrapSSR: (arr) => ({ aweme_list: arr }),
       onLog: log,
     });

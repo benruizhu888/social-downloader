@@ -19,11 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-----------------------------------------------------------------------------
-
-第三方组件许可提示：
-
-本项目依赖 ffmpeg-static（随 npm install 安装），其许可为 GPL-3.0-or-later。
-若你要分发本软件的二进制形式，请确保遵守 GPL-3.0 的相应义务；
-仅分发本仓库源码时，上述 MIT 条款适用于本项目自身代码。

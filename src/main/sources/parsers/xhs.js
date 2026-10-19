@@ -7,7 +7,7 @@
  *   video     —— 视频笔记
  *   livephoto —— 图集里的实况图（图片本身带一段独立动态片段）
  */
-const { normalizeUrl, extFromUrl, deepFindVideo, deepFindImages, unique } = require('./util');
+const { normalizeUrl, extFromUrl, deepFindVideo, deepFindImages, unique, mapItemsSafely, isoOrEmpty } = require('./util');
 
 // 判定"这是个作品"的强特征：小红书作品必然带图集或视频。
 // ⚠️ 必须同时认驼峰与下划线两种写法：
@@ -226,7 +226,13 @@ function noteToItem(raw) {
   return {
     id,
     title,
-    createdAt: note.time ? new Date(Number(note.time)).toISOString() : '',
+    /**
+     * 发布时间。`note.time` 是接口给的「秒级时间戳」，但**不可信**：
+     * 实测出现过 `'今天'`、空串、13 位毫秒数。直接 `new Date(Number(x)).toISOString()`
+     * 遇到前两种会抛 `RangeError: Invalid time value` —— 而这个异常会顺着 map 冒出去，
+     * 让**整页**作品被丢掉（P1-5 的真实形态）。这里一律走 isoOrEmpty。
+     */
+    createdAt: note.time ? isoOrEmpty(new Date(Number(note.time))) : '',
     author: note.user?.nickname || note.author?.name || '',
     likeCount:
       note.interact_info?.liked_count ||
@@ -245,15 +251,29 @@ function noteToItem(raw) {
   };
 }
 
-/** 从截获的响应里提取作品列表 */
-function parseXhsResponse(data) {
+/**
+ * 从截获的响应里提取作品列表（带解析统计）。
+ *
+ * 为什么返回 `{items, skipped}` 而不是裸数组：一条作品的字段脏了**不能连累整页**
+ * （见 util.mapItemsSafely 的注释）。上层需要知道「这一页丢了几条」才能如实告诉用户，
+ * 否则用户只看到作品变少、日志里却一切正常。
+ *
+ * @param {object} data 截获到的接口响应 / 首屏直出数据
+ * @returns {{items: object[], skipped: number}}
+ */
+function parseXhsResponseDetailed(data) {
   let notes = data?.data?.notes || data?.notes || data?.data?.note_list;
   if (!Array.isArray(notes)) {
     // 首屏直出 / 接口改版：结构未知时递归找
     notes = deepCollectNotes(data);
   }
-  if (!Array.isArray(notes)) return [];
-  return notes.map(noteToItem).filter(Boolean);
+  if (!Array.isArray(notes)) return { items: [], skipped: 0 };
+  return mapItemsSafely(notes, noteToItem);
+}
+
+/** 从截获的响应里提取作品列表（旧签名：只要数组，保持既有调用点不变） */
+function parseXhsResponse(data) {
+  return parseXhsResponseDetailed(data).items;
 }
 
 /** 是否还有下一页 */
@@ -264,6 +284,7 @@ function hasMore(data) {
 
 module.exports = {
   parseXhsResponse,
+  parseXhsResponseDetailed,
   noteToItem,
   hasMore,
   stripSuffix: toOriginalUrl, // 兼容旧调用名

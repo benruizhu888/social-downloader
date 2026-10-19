@@ -1,70 +1,30 @@
-# ---------------- 依赖 ----------------
+# 依赖目录：体积巨大且能由 package.json 完整重建，不入库
 node_modules/
-jspm_packages/
-.pnp
-.pnp.js
 
-# ---------------- 构建产物 ----------------
+# 打包产物：asar / 安装包由 tools/pack-asar.js 生成，属于构建输出
 dist/
-build/
-out/
-release/
-*.asar
-*.asar.unpacked/
-app.asar
-app.asar.bak-*
-*.exe
-*.dll
 
-# ---------------- 日志 ----------------
-logs/
+# 本地工作目录：跑冒烟/调试时生成的临时产物。
+#   尤其是 work/smoke/ud-* —— 那是 Chromium 的用户数据目录，里面有
+#   Preferences / Local State / Session Storage 等**浏览器登录态残留**，绝不能进仓库
+work/
+
+# UI 改造前的整包快照：只是一份历史备份，正文在 src/ 里，不需要两份真相
+backup-ui-*/
+
+# asar 包体：同上，构建产物
+*.asar
+
+# 本机环境配置：里面是每个人自己的安装路径（见 .env.example），
+#   变量本身无害，但推到外部仓库会造成混淆，且可能夹带隐私路径
+.env
+.env.local
+.env.*.local
+
+# 日志：运行时输出（有的会带本机绝对目录、Cookie 值），一律不入库
 *.log
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-crash.log
-crash.log.*
 
-# ---------------- 缓存 ----------------
-.cache/
-.npm
-.eslintcache
-.parcel-cache/
-.temp/
-tmp/
-*.tsbuildinfo
-coverage/
-.nyc_output/
-
-# ---------------- 环境变量与密钥（重点） ----------------
-.env
-.env.*
-!.env.example
-*.pem
-*.p12
-*.pfx
-*.key
-*.crt
-id_rsa
-id_rsa.pub
-id_ed25519
-*.keystore
-secrets.json
-credentials.json
-auth.json
-auth-token.json
-login-state.json
-settings.json
-
-# ---------------- 编辑器 / 系统 ----------------
-.idea/
-.vscode/
-!.vscode/extensions.json
+# 操作系统缩略图/索引文件：Windows 的 Thumbs.db、macOS 的 .DS_Store
 .DS_Store
 Thumbs.db
-desktop.ini
-*.swp
-
-# ---------------- 测试与本地产物 ----------------
-*-redacted/
-*-redacted-strict/

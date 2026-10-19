@@ -79,6 +79,110 @@ function scrollPageToBottom() {
 const SCROLL_TO_BOTTOM_JS = '(' + scrollPageToBottom.toString() + ')()';
 
 /**
+ * 带缓存版的滚动：优先滚上一轮找到的那个容器，找不到再全量重扫。
+ *
+ * 为什么需要缓存（J-1）：`scrollPageToBottom` 每次都要 `querySelectorAll('div,main,section')`
+ * 并在页面里对**每个**元素调一次 `getComputedStyle`。抖音主页那种页面有一两千个节点，
+ * 一轮下来就是两千次样式计算 —— 而采集循环每 1.3 秒跑一轮、一跑几十轮。
+ * 实测这是采集期间渲染进程 CPU 的主要来源（窗口隐藏时也在烧）。
+ *
+ * 缓存的失效条件（两条，缺一不可）：
+ *   · 元素 `isConnected === false`（页面重渲染把容器换掉了）；
+ *   · 调用方每 5 轮强制重扫一次（懒加载结构可能变了，但我们不想每轮都付全量扫描的钱）。
+ *
+ * ⚠️ 与 `scrollPageToBottom` 一样，本函数会被 `toString()` 后注入页面执行，
+ * **必须自包含**（不能引用模块作用域里的任何东西），所以 `byPath` / `pathOf` 都写在里面。
+ *
+ * @param {number[]|null} cachedPath 上一次算出的「从 documentElement 下来的子节点下标链」
+ * @returns {{delta:number, path:number[]|null, hit:boolean}}
+ */
+function scrollPageToBottomCached(cachedPath) {
+  const doc = document;
+  const win = window;
+
+  /** 把元素表示成「子节点下标链」，跨轮次仍能定位（比 nth-child 选择器更稳） */
+  function pathOf(el) {
+    const p = [];
+    let n = el;
+    while (n && n.parentNode && n !== doc.documentElement) {
+      const parent = n.parentNode;
+      const kids = parent.children || [];
+      const idx = Array.prototype.indexOf.call(kids, n);
+      if (idx < 0) return null;
+      p.unshift(idx);
+      n = parent;
+    }
+    return n === doc.documentElement ? p : null;
+  }
+
+  function byPath(p) {
+    let n = doc.documentElement;
+    if (!n || !Array.isArray(p)) return null;
+    for (const i of p) {
+      const kids = n.children || [];
+      if (!kids[i]) return null;
+      n = kids[i];
+    }
+    return n;
+  }
+
+  // 滚 window 这一步永远要做：小红书/微博就是普通文档流（成本极低）
+  const docH = doc.documentElement ? doc.documentElement.scrollHeight : 0;
+  const bodyH = doc.body ? doc.body.scrollHeight : 0;
+  const pageH = docH > bodyH ? docH : bodyH;
+  try {
+    win.scrollTo(0, pageH);
+  } catch (e) {
+    /* 有些页面禁止脚本滚动，忽略 */
+  }
+
+  // ① 缓存命中：只算一次 scrollHeight-clientHeight（不需要 getComputedStyle）
+  const cached = byPath(cachedPath);
+  if (cached && cached.isConnected !== false) {
+    const d = (cached.scrollHeight || 0) - (cached.clientHeight || 0);
+    if (d > 40) {
+      cached.scrollTop = cached.scrollHeight;
+      return { delta: d, path: cachedPath, hit: true };
+    }
+  }
+
+  // ② 全量扫描（与 scrollPageToBottom 同一判据：差最大 + 真的可滚）
+  let best = null;
+  let bestDelta = 0;
+  const all = doc.querySelectorAll ? doc.querySelectorAll('div,main,section') : [];
+  for (let i = 0; i < all.length; i++) {
+    const el = all[i];
+    if (!el) continue;
+    // 先算差值：绝大多数节点（差 <= 40）连样式都不用取
+    const delta = (el.scrollHeight || 0) - (el.clientHeight || 0);
+    if (delta <= 40 || delta <= bestDelta) continue;
+    let oy = '';
+    try {
+      oy = typeof getComputedStyle === 'function' ? getComputedStyle(el).overflowY : '';
+    } catch (e) {
+      oy = '';
+    }
+    if (oy !== 'auto' && oy !== 'scroll') continue;
+    bestDelta = delta;
+    best = el;
+  }
+  if (best) {
+    best.scrollTop = best.scrollHeight;
+    return { delta: bestDelta, path: pathOf(best), hit: false };
+  }
+  return { delta: pageH, path: null, hit: false };
+}
+
+/**
+ * 造一次「带缓存滚动」的注入脚本。
+ * @param {number[]|null} path
+ * @returns {string}
+ */
+function scrollScriptWith(path) {
+  return '(' + scrollPageToBottomCached.toString() + ')(' + JSON.stringify(path || null) + ')';
+}
+
+/**
  * 「这份作品有多完整」的打分 —— 用来决定详情页补全的结果要不要覆盖列表页的结果。
  *
  * 为什么不能简单比 medias 条数：
@@ -116,6 +220,31 @@ function mergeItem(oldIt, newIt) {
     out.noteDetail = oldIt.noteDetail;
   }
   return out;
+}
+
+/**
+ * 把「parse 的返回值」归一成 `{items, skipped, hasMore}`。
+ *
+ * 为什么允许两种形态：`parse` 在本项目里是平台适配器提供的闭包，
+ * 历史上只返回数组；现在还需要带出「跳过几条」「还有没有下一页」（P1-5 / J-1）。
+ * 为了不把每个适配器和每个测试都改一遍，这里**两种都认**：
+ *   数组 → {items: 数组, skipped: 0, hasMore: undefined}
+ *   对象 → 按字段取，缺什么补什么
+ * 旧写法继续可用，新写法按需升级。
+ *
+ * @param {Array|{items?:Array, skipped?:number, hasMore?:boolean}} parsed
+ * @returns {{items: Array, skipped: number, hasMore: boolean|undefined}}
+ */
+function normalizePage(parsed) {
+  if (Array.isArray(parsed)) return { items: parsed, skipped: 0, hasMore: undefined };
+  if (parsed && typeof parsed === 'object') {
+    return {
+      items: Array.isArray(parsed.items) ? parsed.items : [],
+      skipped: Number(parsed.skipped) > 0 ? Number(parsed.skipped) : 0,
+      hasMore: typeof parsed.hasMore === 'boolean' ? parsed.hasMore : undefined,
+    };
+  }
+  return { items: [], skipped: 0, hasMore: undefined };
 }
 
 class Harvester {
@@ -161,6 +290,13 @@ class Harvester {
     detailRounds = 16,
     /** 看到这篇作品的数据之后，再等几轮让更完整的版本进来 */
     detailSettleRounds = 2,
+    /** 采够这么多就停（0 = 不限）。编排层最后还会截断，但那时已经白采了一大堆（J-1） */
+    maxItems = 0,
+    /** 有新增时的滚轮间隔；空闲时放宽到 idleSleepMs（自适应，见 start 里的循环） */
+    activeSleepMs = 700,
+    idleSleepMs = 1300,
+    /** 首屏直出探测的最小间隔（同一 URL）：它要遍历页面所有全局对象，比滚动贵得多 */
+    ssrMinGapMs = 900,
   }) {
     this.partition = partition;
     this.url = url;
@@ -223,6 +359,28 @@ class Harvester {
     this.items = new Map();
     this.stopped = false;
     this.win = null;
+    /** 采集上限（见构造参数 maxItems） */
+    this.maxItems = Number(maxItems) > 0 ? Number(maxItems) : 0;
+    this.activeSleepMs = activeSleepMs;
+    this.idleSleepMs = idleSleepMs;
+    this.ssrMinGapMs = ssrMinGapMs;
+    /**
+     * 解析层「跳过」了多少条结构异常的数据（P1-5）。
+     * 单独计数而不是只打日志：收尾时要能说「本次共跳过 N 条」，否则用户只会觉得少了东西。
+     */
+    this.parseSkipped = 0;
+    /** 同一作品被「更新」（拿到更完整的一份）的次数，与新增分开统计（P1-14） */
+    this.updated = 0;
+    /**
+     * 页面自己说「没有下一页」了（解析层的 hasMore === false）。
+     * 置位后主循环把 idle 直接抬到上限，下一轮就收工 —— 不必再猜 5 轮（J-1）。
+     */
+    this.noMorePages = false;
+    /** 滚动的容器缓存（见 scrollPageToBottomCached） */
+    this._scrollPath = null;
+    /** 首屏直出探测的节流状态（J-1） */
+    this._ssrAt = 0;
+    this._ssrUrl = '';
     this.intercepted = 0; // 截获到多少个候选响应（用于区分「没发请求」和「发了没数据」）
     this.ssrFound = 0; // 首屏直出里找到多少条候选作品（用于区分「没数据」和「解析没对上」）
     /**
@@ -239,18 +397,49 @@ class Harvester {
     this.ssrError = '';
   }
 
+  /**
+   * 把「parse 的返回值」归一成 `{items, skipped, hasMore}`。
+   *
+   * 为什么允许两种形态：`parse` 在本项目里是平台适配器提供的闭包，
+   * 历史上只返回数组；现在还需要带出「跳过几条」「还有没有下一页」。
+   * 为了不把每个适配器和每个测试都改一遍，这里**两种都认**：
+   *   数组 → {items: 数组, skipped: 0, hasMore: undefined}
+   *   对象 → 按字段取，缺什么补什么
+   * 这样旧写法继续可用，新写法按需升级。
+   *
+   * @param {Array|{items?:Array, skipped?:number, hasMore?:boolean}} parsed
+   * @returns {{items: Array, skipped: number, hasMore: boolean|undefined}}
+   */
+  static normalizePage(parsed) {
+    return normalizePage(parsed);
+  }
+
   /** 供主进程转发截获到的数据 */
   ingest(url, data) {
     if (!data || typeof data !== 'object') return 0;
     this.intercepted++;
-    let items = [];
+    let page;
     try {
-      items = this.parse(data) || [];
+      page = normalizePage(this.parse(data));
     } catch (err) {
+      // 整页解析抛异常（解析层已经逐条容错了，这里兜的是「结构完全看不懂」那种）
       this.onLog(`解析响应失败：${err.message}`);
       return 0;
     }
+    /**
+     * 逐条容错的战果必须说出来（P1-5）：用户看到的是「作品比预期少」，
+     * 而这句话是唯一能把「少了」和「接口本来就这么点」区分开的信息。
+     */
+    if (page.skipped) {
+      this.parseSkipped += page.skipped;
+      this.onLog(`解析时跳过 ${page.skipped} 条结构异常的数据（不影响其余作品）`);
+    }
+    // 页面自己说没有下一页 → 交给主循环提前收工（J-1）
+    if (page.hasMore === false) this.noMorePages = true;
+
+    const items = page.items;
     let added = 0;
+    let updated = 0;
     for (const it of items) {
       if (!it?.id) continue;
       // 详情阶段只认列表页已有的作品，否则推荐流会把别人的笔记也灌进来
@@ -268,7 +457,7 @@ class Harvester {
       // 表现就是「小红书每篇只下到一张封面」，而日志还一切正常。
       if (mediaScore(it) > mediaScore(old)) {
         this.items.set(it.id, mergeItem(old, it));
-        added++;
+        updated++;
         continue;
       }
       /**
@@ -287,9 +476,17 @@ class Harvester {
       const richer = (this._detailUrlFor(it) || '').length > (this._detailUrlFor(old) || '').length;
       if (mediaScore(it) === mediaScore(old) && richer) {
         this.items.set(it.id, mergeItem(old, it));
-        added++;
+        updated++;
       }
     }
+    /**
+     * 返回值只算**真新增**（P1-14）。
+     *
+     * 早先「换成更完整的一份」也会 `added++`，于是 onProgress 报的「新增 N 个」
+     * 把更新也算进去了：界面数字一路涨、最后作品数却对不上，用户会以为丢了作品。
+     * 更新单独计 `this.updated`，收尾日志里分开说「新增 / 更新」。
+     */
+    this.updated += updated;
     if (added) this.onProgress(this.items.size, added);
     return added;
   }
@@ -384,6 +581,27 @@ class Harvester {
    * 也不认小红书的 note_card，导致「有数据却一条都捞不到」且无法单测。
    */
   async _harvestSSR() {
+    if (!this.win || this.win.isDestroyed()) return 0;
+    /**
+     * 节流（J-1）：同一 URL 上 900ms 内只探一次。
+     *
+     * 为什么盯 URL 而不是盯时间：详情补全阶段每篇都是新 URL（必须探），
+     * 而同一篇页面在等待期间会被翻很多次 —— 每次都遍历全部全局对象（包括
+     * 一堆 Vue/React 的响应式代理），是采集期间最重的操作之一。
+     * 900ms 是实测平衡点：详情页的数据落在 4.6s / 10.8s 这类**秒级**时间上，
+     * 900ms 的粒度足够细，同时把无效探测砍掉一大半。
+     */
+    let url = '';
+    try {
+      url = this.win.webContents.getURL() || '';
+    } catch {
+      url = '';
+    }
+    const now = Date.now();
+    if (url && url === this._ssrUrl && now - this._ssrAt < this.ssrMinGapMs) return 0;
+    this._ssrUrl = url;
+    this._ssrAt = now;
+
     /**
      * 取根对象与捞作品数组的脚本收敛在 core/ssr-walk.js（纯函数、可离线单测）——
      * 这里只负责「把脚本注入页面 + 把结果转成 ingest 认识的结构」。
@@ -480,19 +698,48 @@ class Harvester {
     let noGain = 0;
     const interceptedBefore = this.intercepted;
     /**
-     * 提前收工的判据必须是「**一篇作品的数据都没看到过**」，而不是「没截获到响应」。
+     * 提前收工的判据必须是「**最近几篇作品的数据都没看到**」，而不是「没截获到响应」。
      *
      * 页面每时每刻都在发无关请求（站点配置、未读计数、IM 会话…），
      * 这些同样会被注入脚本当成「候选响应」转发过来 —— 用「有没有截获到响应」当信号，
      * 噪声永远在涨，这条提前收工就永远不会触发（实测：补全期间收到 120 个响应，
      * 其中没有一个是作品数据）。换成 touches 才真的能区分
      * 「详情页是死的（404 / 令牌失效）」和「这些笔记本来就只有一张图」。
+     *
+     * 本轮把「整场是否见过数据」改成**滑动窗口**（J-2）：
+     *   早先用的是 `!sawWithData`（整场一次都没见过），于是只要开头成功补全过一篇，
+     *   后面 200 篇全是 404 也会一路跑到时间上限 —— 用户白等十几分钟。
+     *   现在只看**最近 3 篇**：它们既没有增益、也没有任何一篇返回过数据，就认定
+     *   「这一批详情链接已经失效」，立刻收工。中途只要有一篇见到数据，窗口自然滚掉。
      */
-    /** 见到过「这篇作品的数据」的轮数（用于把「成功 0」的两种成因分开） */
+    const recent = []; // 最近 3 篇：{ gain: boolean, hadData: boolean }
+    const RECENT_WINDOW = 3;
+    /** 全程见过数据的篇数（只用于收尾日志区分「成功 0」的两种成因） */
     let sawWithData = 0;
+    /**
+     * 补全总预算（J-2）：`min(30 分钟, 目标数 × 12 秒)`。
+     *
+     * 12 秒 ≈ 单篇详情页的实测上限（detailPollMs × detailRounds ≈ 12.8s）。
+     * 没有这个上限时，300 篇的作品即便每篇都慢慢等也没有任何约束；
+     * 有了它，最坏情况 30 分钟内收尾，而小批量（10 篇）只给 2 分钟 —— 足够。
+     */
+    const budgetMs = Math.min(30 * 60 * 1000, targets.length * 12000);
+    const detailStarted = Date.now();
 
     for (let i = 0; i < targets.length; i++) {
       if (this.stopped) break;
+      /**
+       * 总预算检查放在**每篇开头**：单篇最长可以等 12 秒，放在开头才能保证
+       * 「超出预算就不再开新的一篇」，收益最直接。
+       */
+      if (Date.now() - detailStarted > budgetMs) {
+        this.onLog(
+          `图集补全已用完总时限（${Math.round(budgetMs / 1000)} 秒），停止继续补全（已完成 ${i}/${
+            targets.length
+          }，列表页封面照常下载）`
+        );
+        break;
+      }
       const target = targets[i];
       const id = target.id;
       const before = mediaScore(this.items.get(id));
@@ -535,16 +782,27 @@ class Harvester {
       }
 
       const after = mediaScore(this.items.get(id));
-      if (after > before) {
+      const gained = after > before;
+      const hadData = (this.touches.get(id) || 0) > seenBefore;
+      if (gained) {
         filled++;
         noGain = 0;
       } else {
         noGain++;
       }
+      recent.push({ gain: gained, hadData });
+      if (recent.length > RECENT_WINDOW) recent.shift();
 
-      if (noGain >= 3 && !sawWithData) {
+      /**
+       * 提前收工：最近 3 篇**既没增益、也没有一篇返回过数据**。
+       * 两个条件必须同时成立 —— 只看 noGain 会误杀「这些笔记本来就只有一张图」的正常情况
+       * （那种情况详情页是**有**数据的，只是媒体数不变）。
+       */
+      const windowFull = recent.length >= RECENT_WINDOW;
+      const windowDead = windowFull && recent.every((r) => !r.hadData);
+      if (noGain >= RECENT_WINDOW && windowDead) {
         this.onLog(
-          `连续 ${noGain} 篇都没能补全，且详情页没有产出任何一篇作品的数据 —— 提前结束补全（列表页的封面仍会照常下载）`
+          `连续 ${noGain} 篇都没能补全，且最近 ${RECENT_WINDOW} 篇详情页都没有返回任何作品数据 —— 提前结束补全（列表页的封面仍会照常下载）`
         );
         break;
       }
@@ -649,11 +907,29 @@ class Harvester {
     while (!this.stopped && Date.now() - started < this.timeoutMs) {
       round++;
       try {
-        await this.win.webContents.executeJavaScript(SCROLL_TO_BOTTOM_JS);
+        /**
+         * 每 5 轮强制重扫一次滚动容器（懒加载可能换掉节点）；
+         * 其余轮次用上一轮缓存的「子节点下标链」，省掉整页的 getComputedStyle。
+         */
+        const forceScan = round % 5 === 0 || !this._scrollPath;
+        const got = await this.win.webContents.executeJavaScript(
+          scrollScriptWith(forceScan ? null : this._scrollPath)
+        );
+        if (got && typeof got === 'object') {
+          // 缓存未命中（hit=false）时 got.path 就是新一轮算出来的容器
+          if (got.path) this._scrollPath = got.path;
+          else if (got.hit === false) this._scrollPath = null;
+        }
       } catch {
         /* 页面跳转/销毁时忽略 */
       }
-      await sleep(1300);
+      /**
+       * 自适应间隔（J-1）：这一轮有新内容就快一点（700ms），没新内容就慢下来（1300ms）。
+       * 早先固定 1300ms —— 有新增时白等半秒，几十轮下来是十几秒的差距；
+       * 而空闲时把间隔压到 700ms 又会白白多滚几十次。
+       */
+      const grewLast = this.items.size > lastCount || round === 1;
+      await sleep(grewLast ? this.activeSleepMs : this.idleSleepMs);
 
       // 首屏数据是异步填进前端 store 的：只在开头取一次很可能取到空壳。
       // 还没拿到任何作品时，每隔几轮再取一次，直到有内容为止。
@@ -674,9 +950,45 @@ class Harvester {
           break;
         }
       }
+
+      /**
+       * 页面自己说没有下一页 → 不必再猜「连续 N 轮无新增」，本轮就收工。
+       * 把 idle 抬到 maxIdle-1 而不是直接 break，是为了让本轮已有的日志与
+       * 「已采集 N 个作品」正常走完（下一轮进来 idle 再加一就退出）。
+       */
+      if (this.noMorePages) {
+        this.noMorePages = false;
+        if (idle < this.maxIdle - 1) {
+          idle = this.maxIdle - 1;
+          this.onLog('接口已返回「没有更多」，不再继续滚动');
+        }
+      }
+
+      /**
+       * 采够就停（J-1）：早先只由编排层在采集结束后截断，采集器仍然会把主页滚到底。
+       * 「最多 10 个作品」却滚了 200 个的时长全白花，而且请求越多越容易被风控。
+       */
+      if (this.maxItems && this.items.size >= this.maxItems) {
+        this.onLog(`已采集到设定的上限 ${this.maxItems} 个作品，停止继续滚动`);
+        break;
+      }
     }
 
     if (Date.now() - started >= this.timeoutMs) this.onLog('达到采集时间上限，结束采集');
+
+    /**
+     * 列表阶段的收尾账目（P1-14）：**新增与更新分开说**。
+     *
+     * 早先「同一作品拿到更完整的一份」也会算进 `added`，于是
+     * 「已采集 N 个作品」的数字会反复上涨、最后又回落到真实条数 ——
+     * 用户看到的是「数字乱跳」，其实是把更新当成了新增。
+     */
+    if (this.items.size) {
+      const skippedText = this.parseSkipped ? `，解析跳过 ${this.parseSkipped} 条异常数据` : '';
+      this.onLog(
+        `列表采集完成：共 ${this.items.size} 个作品（新增 ${this.items.size} / 更新 ${this.updated}${skippedText}）`
+      );
+    }
 
     /**
      * 一条都没采到 → 重载一次页面再试。
@@ -739,4 +1051,13 @@ class Harvester {
   }
 }
 
-module.exports = { Harvester, mediaScore, mergeItem, scrollPageToBottom, SCROLL_TO_BOTTOM_JS };
+module.exports = {
+  Harvester,
+  mediaScore,
+  mergeItem,
+  scrollPageToBottom,
+  SCROLL_TO_BOTTOM_JS,
+  scrollPageToBottomCached,
+  scrollScriptWith,
+  normalizePage,
+};

@@ -92,24 +92,24 @@ t('分享文案里夹着的链接能被抠出来', () => {
 console.log('\n[小红书]');
 t('explore 链接 + xsec_token 保留', () => {
   const r = parseSingleUrl(
-    'https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER?xsec_token=XHS_XSEC_TOKEN_PLACEHOLDER&xsec_source=pc_user'
+    'https://www.xiaohongshu.com/explore/EXAMPLE0000000000000000?xsec_token=ABCdef&xsec_source=pc_user'
   );
   assert.strictEqual(r.platform, 'xhs');
-  assert.strictEqual(r.itemId, '65f0a1b2c3d4e5f60718293a');
+  assert.strictEqual(r.itemId, 'EXAMPLE0000000000000000');
   assert.strictEqual(r.token, 'ABCdef');
   // url 必须原样带上令牌：详情页没它就返回空壳
-  assert.ok(r.url.includes('xsec_token=XHS_XSEC_TOKEN_PLACEHOLDER'));
+  assert.ok(r.url.includes('xsec_token=ABCdef'));
 });
 t('discovery/item 形态', () => {
-  const r = parseSingleUrl('https://www.xiaohongshu.com/discovery/item/XHS_NOTE_ID_PLACEHOLDER');
-  assert.strictEqual(r.itemId, '65f0a1b2c3d4e5f60718293a');
+  const r = parseSingleUrl('https://www.xiaohongshu.com/discovery/item/EXAMPLE0000000000000000');
+  assert.strictEqual(r.itemId, 'EXAMPLE0000000000000000');
 });
 t('user/profile 主页 → 不是单作品', () => {
-  assert.strictEqual(parseSingleUrl('https://www.xiaohongshu.com/user/profile/XHS_USER_ID_PLACEHOLDER'), null);
+  assert.strictEqual(parseSingleUrl('https://www.xiaohongshu.com/user/profile/EXAMPLE0000000000000001'), null);
 });
 t('user/profile/<uid>/<noteId> 识别为单作品', () => {
-  const r = parseSingleUrl('https://www.xiaohongshu.com/user/profile/XHS_USER_ID_PLACEHOLDER/65f0a1b2c3d4e5f60718293a');
-  assert.strictEqual(r.itemId, '65f0a1b2c3d4e5f60718293a');
+  const r = parseSingleUrl('https://www.xiaohongshu.com/user/profile/EXAMPLE0000000000000001/EXAMPLE0000000000000000');
+  assert.strictEqual(r.itemId, 'EXAMPLE0000000000000000');
 });
 
 /* ------------------------------ 抖音识别 ------------------------------ */
@@ -174,7 +174,7 @@ t('多行各自识别，lines 数如实反映用户粘了几行', () => {
   const r = parseInputList(
     [
       'https://www.douyin.com/video/7300000000000000000',
-      'https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER',
+      'https://www.xiaohongshu.com/explore/EXAMPLE0000000000000000',
       'https://weibo.com/1234567890/P0RSTabcde',
     ].join('\n')
   );
@@ -249,7 +249,7 @@ t('混合输入：好的进 targets，坏的进 ignored，数量对得上', () =
     [
       'https://www.douyin.com/video/7300000000000000000',
       'https://www.douyin.com/user/MS4wLjABAAAAxxxx',
-      'https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER',
+      'https://www.xiaohongshu.com/explore/EXAMPLE0000000000000000',
       'https://example.com/nope',
     ].join('\n')
   );
@@ -259,7 +259,7 @@ t('混合输入：好的进 targets，坏的进 ignored，数量对得上', () =
 });
 t('CRLF 换行（Windows 复制粘贴）也能正确拆分', () => {
   const r = parseInputList(
-    'https://www.douyin.com/video/7300000000000000000\r\nhttps://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER'
+    'https://www.douyin.com/video/7300000000000000000\r\nhttps://www.xiaohongshu.com/explore/EXAMPLE0000000000000000'
   );
   assert.strictEqual(r.lines, 2);
   assert.strictEqual(r.targets.length, 2);

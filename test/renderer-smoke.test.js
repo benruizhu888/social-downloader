@@ -287,6 +287,97 @@ t('示例链接随平台切换变化（渲染层不写平台判断，全靠适�
   await new Promise((r) => setTimeout(r, 80));
 });
 
+section('布局重排：当前网站 / 目标地址 / 选项分组');
+
+t('登录区常驻显示当前网站域名，并随平台切换', async () => {
+  const chip = el('authSite');
+  assert.ok(chip, 'index.html 的登录区必须有 #authSite —— 用户要一眼看到自己正在操作哪个站点');
+
+  // 必须在顶栏登录区内：放到页面别处就起不到「登录时说清站点」的作用
+  let node = chip.parentNode;
+  let inAuth = false;
+  while (node) {
+    if (node.classList && node.classList.contains('auth')) { inAuth = true; break; }
+    node = node.parentNode;
+  }
+  assert.ok(inAuth, '#authSite 必须在 .auth 登录区内');
+
+  const expect = { weibo: 'weibo.com', xhs: 'xiaohongshu.com', douyin: 'douyin.com' };
+  const tabs = el('tabs').children;
+  for (const tab of tabs) {
+    el('tabs').fire('click', { target: { closest: (sel) => (sel === '.tab' ? tab : null) } });
+    await new Promise((r) => setTimeout(r, 80));
+    const id = ui().state.platform;
+    assert.ok(expect[id], '未知平台 ' + id);
+    assert.strictEqual(txt('authSite'), expect[id], `${id} 的域名徽章显示不对`);
+    assert.ok(
+      String(chip.dataset.url || '').startsWith('https://'),
+      `${id} 的徽章要带完整地址（点击复制用）：${chip.dataset.url}`
+    );
+  }
+
+  // 点击即复制完整地址，不额外占一个按钮位
+  h.copied.length = 0;
+  chip.fire('click');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(h.copied.length, 1, '点域名徽章应复制当前网站地址');
+  assert.ok(/^https:\/\//.test(h.copied[0]), `复制的内容应是完整 URL：${h.copied[0]}`);
+
+  // 切回微博，避免影响后面的用例（本文件靠后的断言按微博的选项写）
+  const back = tabs.find((c) => c.dataset.platform === 'weibo');
+  el('tabs').fire('click', { target: { closest: (sel) => (sel === '.tab' ? back : null) } });
+  await new Promise((r) => setTimeout(r, 80));
+});
+
+t('目标地址显示在输入卡片的动作行里，且与快捷键提示互斥', () => {
+  const inline = el('targetInline');
+  assert.ok(inline, 'index.html 必须有 #targetInline');
+
+  let node = inline.parentNode;
+  let inComposer = false;
+  while (node) {
+    if (node.classList && node.classList.contains('composer')) { inComposer = true; break; }
+    node = node.parentNode;
+  }
+  assert.ok(inComposer, '#targetInline 必须在输入卡片内（它跟着「开始下载」走，不再埋在右栏底部）');
+
+  // 空输入：只剩快捷键提示
+  const box = el('inputUid');
+  box.value = '';
+  box.fire('input');
+  assert.strictEqual(inline.hidden, true, '没有输入时不该显示一个空的目标地址');
+  assert.strictEqual(el('pasteHint').hidden, false, '没有输入时应显示快捷键提示');
+
+  // 有输入：换成目标地址
+  box.value = 'https://weibo.com/u/1234567890';
+  box.fire('input');
+  assert.strictEqual(inline.hidden, false, '有输入时必须显示解析到的目标地址');
+  assert.strictEqual(el('pasteHint').hidden, true, '两种状态互斥，不能同时占着这一行');
+  assert.strictEqual(txt('targetUrl'), 'https://weibo.com/u/1234567890');
+
+  box.value = '';
+  box.fire('input');
+});
+
+t('数字项前插入了「抓取范围与并发」分组标题，且只有一个', () => {
+  const box = el('options');
+  const subs = box.children.filter((c) => c.classList && c.classList.contains('grid-sub'));
+  assert.strictEqual(subs.length, 1, '只应有一个数字分组标题（每个数字项都插一次就错了）');
+  assert.strictEqual(subs[0].textContent, '抓取范围与并发');
+
+  const firstNum = box.children.find((c) => c.classList && c.classList.contains('num'));
+  assert.ok(firstNum, '微博面板应有数字项');
+  const iSub = box.children.indexOf(subs[0]);
+  const iNum = box.children.indexOf(firstNum);
+  assert.ok(iSub < iNum, '分组标题必须在第一个数字项之前');
+  assert.strictEqual(iSub + 1, iNum, '分组标题应紧贴第一个数字项，中间不能夹着勾选项');
+
+  // 分组标题不能干扰「只对主页模式生效」的显隐逻辑：它没有 scope，任何模式下都不隐藏
+  ui().applyOptionScope('single');
+  assert.strictEqual(subs[0].hidden, false, '分组标题不该被 applyOptionScope 误隐藏');
+  ui().applyOptionScope('profile');
+});
+
 /* ------------------------------- 运行 ------------------------------- */
 
 (async function main() {

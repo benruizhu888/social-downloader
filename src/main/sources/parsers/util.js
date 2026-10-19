@@ -1,6 +1,12 @@
 /** 解析层公共工具：两家平台字段结构都不稳定，一律走多路径 + 递归兜底 */
 
 /**
+ * 扩展名判定统一走 `core/ext.js`（本轮把仓库里三份彼此不一致的实现合成一份）。
+ * 这里保留同名导出，是为了让 xhs/douyin 的调用点一行都不用改。
+ */
+const { extFromUrl } = require('../../core/ext');
+
+/**
  * 小红书视频流的 master_url 经常是 base64 编码的（形如 aHR0cDovL3Nuc3ZpZGVv...），
  * 直接当 URL 用会 404。这里做一次「看起来像 base64 且解码后是 http 链接」的还原。
  */
@@ -23,11 +29,6 @@ function normalizeUrl(u) {
   if (typeof s !== 'string') return null;
   if (s.startsWith('//')) return 'https:' + s;
   return s.startsWith('http') ? s : null;
-}
-
-function extFromUrl(url, fallback = 'jpg') {
-  const m = String(url || '').match(/\.(jpg|jpeg|png|webp|heic|gif|mp4|mov|m3u8)(?=\?|\/|$)/i);
-  return (m ? m[1].toLowerCase() : fallback).replace('jpeg', 'jpg');
 }
 
 /** 取数组中第一个合法 URL */
@@ -120,6 +121,48 @@ function unique(arr) {
 }
 
 /**
+ * 逐条解析：**一条脏数据只丢它自己**，不能连累整页。
+ *
+ * 复现的缺陷（P1-5）：`parseXhsResponse` 早先是 `notes.map(noteToItem).filter(Boolean)`。
+ * 只要有一条作品的字段长得奇怪（实测最典型的是 `time` 是 `'今天'` 这种非数字，
+ * `new Date(Number(...)).toISOString()` 直接抛 `RangeError: Invalid time value`），
+ * 整个 `map` 就炸掉 —— 上层 `ingest` 的 catch 把**整页**当失败丢掉，
+ * 日志只留一句「解析响应失败」。表现就是「明明有 20 篇，只下到 3 篇」。
+ *
+ * 语义约定：
+ *   · `mapFn` 返回假值 → 计入 skipped（结构不完整，本来就不该产出作品）
+ *   · `mapFn` 抛异常   → 计入 skipped，并通过 `onSkip(err, raw)` 回调报告
+ * 两个计数合并成一个 `skipped`，因为对用户来说它们是同一件事：「这几条没解析出来」。
+ *
+ * @param {Array} list 原始数组（接口响应里的作品列表）
+ * @param {Function} mapFn (raw) => item|null
+ * @param {Function} [onSkip] (err, raw) => void
+ * @returns {{items: Array, skipped: number}}
+ */
+function mapItemsSafely(list, mapFn, onSkip) {
+  const items = [];
+  let skipped = 0;
+  if (!Array.isArray(list)) return { items, skipped };
+  for (const raw of list) {
+    try {
+      const it = mapFn(raw);
+      if (it) items.push(it);
+      else skipped++;
+    } catch (err) {
+      skipped++;
+      if (typeof onSkip === 'function') {
+        try {
+          onSkip(err, raw);
+        } catch {
+          /* 报告失败不能再把解析带崩 */
+        }
+      }
+    }
+  }
+  return { items, skipped };
+}
+
+/**
  * 明文 http 的媒体地址升级成 https。
  *
  * 为什么必须有它（第 16 轮真机矩阵实测，微博视频 403 的真正根因）：
@@ -146,4 +189,23 @@ module.exports = {
   decodeMaybeBase64,
   unique,
   httpsUpgraded,
+  mapItemsSafely,
+  /** 把任意日期输入变成 ISO 串；非法时返回 ''（绝不让 RangeError 冲出去） */
+  isoOrEmpty,
 };
+
+/**
+ * `new Date(x).toISOString()` 的安全版本。
+ *
+ * 为什么要单独一个函数：`toISOString()` 对 Invalid Date 会抛 `RangeError`，
+ * 而作品时间来自平台数据（可能是 `'今天'`、`''`、`0`、超大数），一律不可信。
+ * 报错位置在解析循环深处，一次抛出就是**整页丢失**（见 mapItemsSafely 的注释）。
+ *
+ * @param {Date} d
+ * @returns {string} ISO 字符串，非法时为空串
+ */
+function isoOrEmpty(d) {
+  if (!d || typeof d.toISOString !== 'function') return '';
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString();
+}

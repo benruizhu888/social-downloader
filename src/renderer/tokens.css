@@ -1,0 +1,189 @@
+@charset "utf-8";
+/**
+ * 设计令牌 —— 界面里所有数值的**唯一来源**
+ * ============================================================
+ * 为什么单独一个文件：
+ *   改版前 style.css 里有 42 个 hex 颜色、25 处 rgba、13 档字号、7 种控件高度、
+ *   20 种间距，同类控件彼此差 2~4px，改一处要满文件搜一遍同类值。
+ *   现在颜色/字号/间距/圆角/高度/阴影/层级/动效全部收敛在这里，
+ *   style.css 内不允许再出现任何颜色字面量（由 test/ui-tokens.test.js 强制）。
+ *
+ * 取值不是随手挑的：
+ *   · 文字与语义色的对比度都按 WCAG AA 实测过（正文 ≥4.5:1、控件边框与焦点 ≥3:1）；
+ *   · 控件高度只有 4 档（24/28/32/40），满足 WCAG 2.2 的 24×24 最小可点区域；
+ *   · 间距一律 4px 栅格；字号从 13 档收敛到 6 档，标题层级不再倒挂。
+ *
+ * 加载顺序：必须在 style.css **之前**加载（index.html 里两个 <link>）。
+ */
+
+:root {
+  /* ---------------- 表面 ---------------- */
+  --c-canvas: #f3f4f6;
+  --c-surface: #ffffff;
+  --c-surface-2: #fafbfc;
+  --c-surface-3: #f0f2f5;
+  --c-surface-4: #f1f3f6;        /* 行 hover */
+  --c-surface-log: #fbfbfc;      /* 日志区底 */
+  --c-track: #eef0f4;            /* 进度条轨道 */
+  /* 顶栏粘滞在顶部，滚动时内容会从它下面穿过。留透明度会让卡片文字在顶栏 8px 内边距里
+     透出一条边（无 GPU 时 backdrop-filter 不生效，那条边更明显）—— 直接不透明，视觉上零差异 */
+  --c-topbar-bg: #f3f4f6;
+
+  /* ---------------- 线条 ---------------- */
+  --c-line: #e8eaee;             /* 分隔线（装饰，无对比度要求） */
+  --c-line-2: #d8dde5;           /* 强分隔线 */
+  --c-line-3: #d5dbe3;           /* 滚动条滑块 */
+  --c-line-4: #bcc4d0;           /* 滚动条滑块 hover */
+  --c-border-ctl: #868f9d;       /* 控件边框：3.27:1 vs 白底（1.4.11 要求 ≥3） */
+  --c-border-ctl-strong: #5f6773;/* 控件边框 hover / active：5.72:1 */
+
+  /* ---------------- 文字 ---------------- */
+  --c-ink: #14161a;              /* 18.11:1 */
+  --c-ink-2: #3b414b;            /* 10.28:1 */
+  --c-ink-3: #5f6773;            /* 5.72:1 白底 / 5.19:1 canvas —— 替代原 #6c7482 */
+  --c-ink-4: #666e7b;            /* 5.15:1 白底 / 4.68:1 canvas —— 替代原 --faint（仅 2.61:1，不合格） */
+
+  /* ---------------- 语义色 ---------------- */
+  --c-accent: #2e5bff;           /* 5.18:1 */
+  --c-accent-strong: #1f45d8;    /* 7.24:1 */
+  --c-accent-300: #7d95ff;       /* 仅用于渐变端 */
+  --c-accent-soft: #eef2ff;
+  --c-accent-line: #c5d0fb;
+
+  --c-ok: #0e7a54;               /* 5.36:1 白底 / 5.17:1 日志底 —— 统一原先三种绿 */
+  --c-ok-strong: #0b6b4a;
+  --c-ok-soft: #eaf7f1;
+
+  --c-warn: #8a5600;             /* 6.16:1 */
+  --c-warn-strong: #7d4b00;
+  --c-warn-soft: #fdf3e3;
+
+  --c-danger: #c0392f;           /* 5.43:1 */
+  --c-danger-strong: #9c2a2e;    /* 失败明细标题 */
+  --c-danger-ink: #7c4a4c;       /* 失败明细正文 */
+  --c-danger-soft: #fdeeed;
+
+  --c-mark: #ffe9a8;             /* 搜索命中高亮 */
+
+  /* ---------------- 中性（主按钮 / Toast / 品牌） ---------------- */
+  --c-neutral-800: #24272e;
+  --c-neutral-850: #191c21;
+  --c-neutral-900: #1b1e24;
+  --c-neutral-950: #0b0d10;
+  --c-on-dark: #ffffff;
+
+  /* ---------------- 交互反馈（透明度类，无法用纯色表达） ---------------- */
+  --c-scrim: rgba(16, 20, 30, 0.42);      /* 弹窗遮罩 */
+  --c-hover: rgba(20, 22, 26, 0.05);      /* 次要按钮 hover 底 */
+  --c-hover-strong: rgba(20, 22, 26, 0.08);
+  --c-ripple: rgba(20, 22, 26, 0.12);     /* 浅底按钮涟漪 */
+  --c-ripple-on-dark: rgba(255, 255, 255, 0.35);
+  --c-sheen: rgba(255, 255, 255, 0.28);   /* 运行中的扫光 */
+  --shadow-logo: 0 2px 6px rgba(16, 20, 30, 0.22);
+
+  /* ---------------- 语义色对应的「描边」（软底上的边框） ---------------- */
+  --c-ok-line: #c6e6d8;
+  --c-warn-line: #f0dcb8;
+  --c-danger-line: #f3d3d1;
+
+  /* 平台品牌色：只做身份标识，不做动作色（三个平台主色都是红，混用会失去语义） */
+  --c-plat-idle: #6f7783;        /* 未匹配到平台时的占位色块：白字 4.52:1（原 #8a929e 只有 3.14:1） */
+  --c-plat-weibo: #e6162d;       /* 白字 4.65:1 */
+  --c-plat-xhs: #d81e3c;         /* 白字 5.04:1（原 #ff2442 只有 3.76:1） */
+  --c-plat-douyin: #161823;      /* 白字 17.66:1 */
+
+  /* ---------------- 字号 / 行高（6 档） ---------------- */
+  --fs-11: 11px;  --lh-11: 16px;
+  --fs-12: 12px;  --lh-12: 18px;
+  --fs-13: 13px;  --lh-13: 20px;
+  --fs-14: 14px;  --lh-14: 20px;
+  --fs-16: 16px;  --lh-16: 24px;
+  --fs-20: 20px;  --lh-20: 26px;
+  --fs-log: 12px; --lh-log: 21px;  /* 日志区：等宽 + 1.75 行高 */
+
+  --font: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, "Courier New", monospace;
+
+  /* ---------------- 间距（4px 栅格） ---------------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* ---------------- 圆角 ---------------- */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+  --r-2xl: 18px;
+  --r-pill: 999px;
+
+  /* ---------------- 控件高度（4 档） ---------------- */
+  --ctrl-xs: 24px;
+  --ctrl-sm: 28px;
+  --ctrl-md: 32px;
+  --ctrl-lg: 40px;
+  --h-topbar: 60px;
+  --w-side: 320px;
+
+  /* ---------------- 阴影 ---------------- */
+  --shadow-1: 0 1px 2px rgba(16, 20, 30, 0.05);
+  --shadow-2: 0 8px 24px rgba(16, 20, 30, 0.08);
+  --shadow-3: 0 24px 60px rgba(16, 20, 30, 0.18);
+  --shadow-btn-hover: 0 4px 12px rgba(16, 20, 30, 0.08);
+  --shadow-primary: 0 1px 2px rgba(16, 20, 30, 0.28), 0 6px 16px rgba(16, 20, 30, 0.12);
+  --shadow-primary-hover: 0 2px 4px rgba(16, 20, 30, 0.3), 0 10px 24px rgba(16, 20, 30, 0.18);
+
+  /* ---------------- 焦点（用 outline，对比度 4.70:1，原 box-shadow 环仅 1.35:1） ---------------- */
+  --focus-width: 2px;
+  --focus-offset: 2px;
+  --focus-color: var(--c-accent);
+
+  /* ---------------- 层级 ---------------- */
+  --z-log-new: 5;
+  --z-side: 10;
+  --z-topbar: 30;
+  --z-modal: 50;
+  --z-toast: 60;
+
+  /* ---------------- 动效 ---------------- */
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 240ms;
+}
+
+/* 只放 @keyframes：令牌文件不承载任何选择器样式 */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes pop {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ripple {
+  to { transform: scale(2.7); opacity: 0; }
+}
+@keyframes sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+@keyframes flow {
+  to { background-position: -200% 0; }
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--c-accent-soft); }
+  50% { box-shadow: 0 0 0 5px rgba(46, 91, 255, 0.06); }
+}

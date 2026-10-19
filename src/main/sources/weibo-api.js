@@ -13,6 +13,17 @@ const UA =
 
 const { describeNetworkError, isNetworkError, refererFor } = require('../core/net');
 const { httpsUpgraded } = require('./parsers/util');
+const { extFromUrl } = require('../core/ext');
+
+/**
+ * 单次请求的默认超时。
+ *
+ * 为什么必须有它（P1-1）：微博接口偶尔会「连上了但一个字节都不回」——
+ * undici 的默认超时很长（分钟级），于是整个任务卡在第一个请求上，
+ * 界面上「正在读取微博列表…」永远不结束，用户只能强杀。
+ * 15 秒是实测下的平衡点：正常接口 200~800ms 返回，慢网也很少超过 3 秒。
+ */
+const DEFAULT_TIMEOUT_MS = 15000;
 
 class WeiboError extends Error {
   constructor(message, code) {
@@ -39,12 +50,38 @@ class WeiboClient {
     this.cookie = cookie;
   }
 
-  async requestJSON(url, { headers = {}, retries = 2 } = {}) {
+  /**
+   * 发一次 GET 并解析 JSON（带超时、可取消、有限重试）。
+   *
+   * @param {string} url
+   * @param {object} [opts]
+   * @param {object}  [opts.headers]    额外请求头
+   * @param {number}  [opts.retries=2]  网络类失败的额外重试次数
+   * @param {number}  [opts.timeoutMs=15000] 单次请求的超时
+   * @param {AbortSignal} [opts.signal] 外部取消信号（用户点了停止）
+   */
+  async requestJSON(url, { headers = {}, retries = 2, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
     // Referer 统一过 refererFor：微软/新浪的接口都是 https，正常都会保留；
     // 万一被 302 到 http 端点，带 https 的 Referer 会被 Chromium 直接拦掉整个请求。
     const referer = refererFor(url, 'https://weibo.com/');
     let lastErr;
     for (let attempt = 0; attempt <= retries; attempt++) {
+      // 已经取消了就别再发请求（包括重试）
+      if (signal?.aborted) throw abortError();
+
+      /**
+       * 每次尝试都用一个**新的** controller 与**独立**的计时器：
+       *   · 复用同一个 controller 的话，第一次超时之后重试会立刻又被 abort；
+       *   · 计时器如果跨尝试累计，重试越多次、可用时间越短，行为无法解释。
+       */
+      const ac = new AbortController();
+      let timedOut = false;
+      const onOuterAbort = () => ac.abort();
+      if (signal) signal.addEventListener('abort', onOuterAbort, { once: true });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        ac.abort();
+      }, timeoutMs);
       try {
         const res = await this.fetchImpl(url, {
           method: 'GET',
@@ -58,6 +95,7 @@ class WeiboClient {
             ...headers,
           },
           credentials: 'include',
+          signal: ac.signal,
         });
         const text = await res.text();
         if (res.status === 403 || text.includes('前方有点拥堵')) {
@@ -72,12 +110,23 @@ class WeiboClient {
         }
         return json;
       } catch (err) {
+        /**
+         * 取消与超时都要**立刻结束、且不重试**：
+         *   · 取消：用户按了停止，再重试就是「停不下来」；
+         *   · 超时：已经白等了 15 秒，重试 2 次就是 45 秒的空白界面。
+         * 两者的文案必须能让人立刻知道发生了什么（前者是操作，后者是故障）。
+         */
+        if (signal?.aborted) throw abortError();
+        if (timedOut) throw timeoutError(timeoutMs);
         // 网络层错误（ENOTFOUND / 连接超时 / 代理不通）在 undici 里只有一句
         // `fetch failed`，直接抛给界面等于什么都没说 —— 翻译成人话再抛。
         lastErr = isNetworkError(err) ? new WeiboError(describeNetworkError(err), 'NETWORK') : err;
         // 登录态问题不做重试，直接抛
         if (lastErr.code === 'NEED_LOGIN' || lastErr.code === 'BAD_JSON') throw lastErr;
         await sleep(600 * (attempt + 1));
+      } finally {
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener?.('abort', onOuterAbort);
       }
     }
     throw lastErr;
@@ -142,7 +191,7 @@ class WeiboClient {
    * @param {string} uid
    * @param {object} opts
    * @param {number}  opts.maxPages  最多抓多少页（每页约 10 条）
-   * @param {Function} opts.onPage   每页回调 (posts, pageNo)
+   * @param {Function} opts.onPage   每页回调 (freshPosts, pageNo, rawData)
    * @param {AbortSignal} opts.signal
    */
   async fetchPosts(uid, { maxPages = 1000, onPage, signal } = {}) {
@@ -164,8 +213,12 @@ class WeiboClient {
 
       let json;
       try {
-        json = await this.requestJSON(url);
+        // signal 必须透传：用户点停止时，正在进行的这一页请求要立刻断掉，
+        // 而不是等它自己超时（否则「停止」按钮看起来要等十几秒才生效）。
+        json = await this.requestJSON(url, { signal });
       } catch (err) {
+        // 用户主动停止不算「读取异常」，原样抛给上层（runner 会按「已停止」收尾）
+        if (err?.code === 'ABORTED') throw err;
         // 末尾分页常常报错，视为结束而不是失败
         if (requests > 0) {
           this.logger(`第 ${requests + 1} 页读取异常，视为已到末尾：${err.message}`);
@@ -179,17 +232,24 @@ class WeiboClient {
       if (!Array.isArray(list) || list.length === 0) break;
 
       const posts = list.map(parsePost).filter(Boolean);
-      let fresh = 0;
+      /**
+       * 只把**真正新增**的推给 onPage。
+       *
+       * 微博接口会重复返回同一条（翻页边界、置顶微博），早先回调里写的是
+       * `totalPosts += pagePosts.length`，于是界面上的「已读取 N 条」比真实条数多，
+       * 与最后「共读取 X 条微博」对不上 —— 用户会以为中间丢了一批（P1-14 的一种）。
+       */
+      const freshPosts = [];
       for (const p of posts) {
         if (!p.id || seen.has(p.id)) continue;
         seen.add(p.id);
         all.push(p);
-        fresh++;
+        freshPosts.push(p);
       }
-      onPage?.(posts, requests, json?.data);
+      onPage?.(freshPosts, requests, json?.data);
 
       // 整页都是已见过的 → 游标不再前进，直接收尾，避免死循环
-      if (fresh === 0 && posts.length) {
+      if (freshPosts.length === 0 && posts.length) {
         this.logger('本页内容均已抓取过，结束分页');
         break;
       }
@@ -223,6 +283,19 @@ class WeiboClient {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** 「用户按了停止」—— 与故障区分开，界面按「已停止」而不是「失败」处理 */
+function abortError() {
+  return new WeiboError('已取消（任务被停止，未完成的请求不再继续）', 'ABORTED');
+}
+
+/** 「等太久」—— 文案里必须带秒数，否则用户不知道是不是卡死了 */
+function timeoutError(timeoutMs) {
+  return new WeiboError(
+    `请求超时（${Math.round(timeoutMs / 1000)} 秒内没有拿到响应）：请检查网络或稍后重试`,
+    'TIMEOUT'
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -510,11 +583,6 @@ function normalizeUrl(u) {
   if (typeof u !== 'string') return u;
   if (u.startsWith('//')) return 'https:' + u;
   return u;
-}
-
-function extFromUrl(url, fallback) {
-  const m = String(url || '').match(/\.(jpg|jpeg|png|gif|webp|heic|mp4|mov|m4v|m3u8)(?=\?|$)/i);
-  return (m ? m[1].toLowerCase() : fallback).replace('jpeg', 'jpg');
 }
 
 module.exports = {

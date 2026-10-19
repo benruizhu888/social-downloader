@@ -257,7 +257,7 @@ function classifyDouyinUrl(u) {
   /**
    * `vid=`：抖音在信息流页（首页推荐 / 发现 / 精选）用这个参数标记「正在播放的那条作品」。
    * 用户 2026-10-16 的日志里能看到它的形态：
-   *   /user/…?enter_from=author_card&from_gid=7670006158224573684&…&vid=7670006158224573684
+   *   /user/…?enter_from=author_card&from_gid=<作品id>&…&vid=<作品id>（示例值，非真实 id）
    *
    * ⚠️ 只在**非主页**路径下认它。上面那条例子里 `/user/<sec_uid>?…&vid=<id>` 是
    * 「从某条视频点进博主主页」留下的出处参数，**不是要下载的作品**；

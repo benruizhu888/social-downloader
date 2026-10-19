@@ -59,13 +59,22 @@ class Downloader {
      * 没有它就保持原行为（直接判失败），有它则**每个任务最多刷新一次**，不会重试风暴。
      */
     this.refreshUrl = typeof refreshUrl === 'function' ? refreshUrl : null;
-    this.stats = { done: 0, skipped: 0, failed: 0, bytes: 0 };
+    /**
+     * `aborted` 与 `failed` 是两件事：
+     *   失败 = 试过了、没成（网络/磁盘/404…），用户需要知道并可能重试；
+     *   中止 = 用户按了停止，这个文件根本没轮到（或正在冷却中），一个字节都没下。
+     * 早先两者混在一起，一按停止界面上就冒出「失败 12 → 未知错误」，
+     * 把真正的失败明细淹掉了。
+     */
+    this.stats = { done: 0, skipped: 0, failed: 0, bytes: 0, aborted: 0 };
     this._written = new Set(); // 本次会话实际写入过的文件，用于判断能否安全续传
     this._active = 0;
     this._queue = [];
     this._stopped = false;
     /** host -> { times: number[], until: number, lastLogAt: number }（见上方冷却参数注释） */
     this._hostState = new Map();
+    /** host -> false 表示「该主机不支持 HEAD」（只记否定结论，见 _probeTotal） */
+    this._headCap = new Map();
   }
 
   /* ---------------------------- 同主机冷却 ---------------------------- */
@@ -121,7 +130,14 @@ class Downloader {
   }
 
   stop() {
+    if (this._stopped) return;
     this._stopped = true;
+    /**
+     * 队列里还没被 worker 取走的任务，一个字节都没请求过 —— 它们是「未执行」，
+     * 不是「失败」。早先 stop() 只清队列不计数，于是界面上既看不到这些文件，
+     * 也看不到「有几个没下」，用户只能怀疑是软件把它们弄丢了。
+     */
+    this.stats.aborted += this._queue.length;
     this._queue.length = 0;
   }
 
@@ -136,6 +152,13 @@ class Downloader {
     const n = Math.max(1, Math.min(this.concurrency, 16));
     for (let i = 0; i < n; i++) workers.push(this._worker());
     await Promise.all(workers);
+    /**
+     * 尾部只汇总一次「停止」这件事。
+     * 逐个文件打「已停止」会把日志刷满，而用户真正想知道的是「还剩几个没下」。
+     */
+    if (this._stopped && this.stats.aborted > 0) {
+      this.logger(`已停止，未执行的 ${this.stats.aborted} 个文件未下载`);
+    }
     return this.stats;
   }
 
@@ -173,6 +196,16 @@ class Downloader {
       }
 
       if (!ok) {
+        /**
+         * 「没轮到」不是「失败」：stop() 之后 lastErr 仍是 null，说明这个任务
+         * 连一次请求都没发出去（要么正在主机冷却里等，要么刚被取走就停了）。
+         * 早先这里一律 stats.failed++ 并打印「失败 → 未知错误」，
+         * 于是用户一按停止，失败明细里就多出一堆莫须有的条目。
+         */
+        if (lastErr === null && this._stopped) {
+          this.stats.aborted++;
+          continue;
+        }
         this.stats.failed++;
         // `fetch failed` 这种壳子对用户毫无意义（真相在 err.cause 里），
         // 统一翻译成「域名解析失败 / 连接被拒绝 / 代理连不上」这类可行动的描述。
@@ -263,6 +296,19 @@ class Downloader {
    *   · 「跳过已存在」对视频彻底失效 —— 每次跑都要把上百个视频重下一遍
    */
   async _probeTotal(url) {
+    /**
+     * 只缓存**否定结论**（性能 #2）。
+     *
+     * 微博视频 CDN 拒绝 HEAD 是**整站行为**，不是个别文件的偶发：
+     * 1000 个文件就是 1000 次注定 403 的 HEAD，每个都白花一个往返
+     * （4 并发下约 50–100 秒），还白白提高触发「主机限流冷却」的概率。
+     * 因此一旦某个主机拒绝过 HEAD，本实例内后续文件直接走 1 字节 Range 探测。
+     *
+     * 缓存是**实例级**（每次任务新建 Downloader），不会跨任务污染；
+     * 而且只记「不支持」，总长永远现取 —— 文件改了内容也不会拿旧值。
+     */
+    const host = this._hostOf(url);
+    if (this._headCap.get(host) === false) return this._probeByRange(url);
     try {
       const head = await this.fetchImpl(url, { method: 'HEAD', headers: this._headers(url) });
       /**
@@ -277,9 +323,22 @@ class Downloader {
         const n = parseInt(len, 10);
         if (Number.isFinite(n) && n > 0) return n;
       }
+      if (host && !okHead && head.status) this._noteNoHead(host);
     } catch {
       /* HEAD 不给就用下一种 */
     }
+    return this._probeByRange(url);
+  }
+
+  /** 记下「这个主机不支持 HEAD」，并只提示一次（否则 1000 个文件刷 1000 条日志） */
+  _noteNoHead(host) {
+    if (this._headCap.get(host) === false) return;
+    this._headCap.set(host, false);
+    this.logger(`${host} 不支持 HEAD 探测，后续文件改用 1 字节 Range 探总长（少一次往返）`);
+  }
+
+  /** 只要 1 字节的 Range 请求，从 Content-Range 里读总长 */
+  async _probeByRange(url) {
     try {
       const headers = this._headers(url);
       headers.Range = 'bytes=0-0';
@@ -305,6 +364,8 @@ class Downloader {
     }
     return null;
   }
+
+
 
   /**
    * 打开目标文件的写句柄（带 Windows 专项恢复）。
@@ -395,6 +456,41 @@ class Downloader {
     if (start > 0 && !this._written.has(dest)) start = 0;
 
     /**
+     * 续传被服务端拒绝/忽略时，**只**重下一次。
+     *
+     * 为什么要重下而不是直接判失败：服务端或代理忽略 Range（回 200 + 整份内容）
+     * 是最常见的一种，这种情形其实完全能下完，只是不能「接着下」。
+     * 为什么不循环重试：如果服务端每次都回 200，那就是永远拿不到区间，
+     * 再试一百次也是同一个结果 —— 所以第二次仍不对就直接报错，绝不死循环。
+     */
+    let from = start;
+    for (;;) {
+      const r = await this._writeOnce(url, task, from, total);
+      if (r === 'done') return;
+      /**
+       * ⚠️ 日志一定要带上「具体原因」：用户看到「服务端不支持断点续传」时
+       * 才有可能判断是网络中间层的问题，而不是我们这个软件坏了。
+       */
+      this.logger(
+        `服务端不支持断点续传（${r.restart}），已从头重下：${path.basename(dest)}`
+      );
+      if (from === 0) throw new Error(`下载失败：${r.restart}`);
+      from = 0;
+    }
+  }
+
+  /**
+   * 一次「发请求 → 落盘」的尝试（起始偏移与是否重下由 _downloadFrom 决定）。
+   *
+   * @param {number} start      期望的起始偏移；0 表示整份下载
+   * @param {number|null} total 已知的总长度（进度显示用，可为 null）
+   * @returns {Promise<'done'|{restart: string}>} 'done' = 写完；
+   *          `{restart}` = 服务端没按 Range 给数据，本次写入已作废，调用方需截断后从 0 重来
+   */
+  async _writeOnce(url, task, start, total) {
+    const dest = task.dest;
+
+    /**
      * 在发请求**之前**先占住目标文件，三个理由：
      *   ① 落不了盘要尽早知道，别把几百 KB 下完了才发现写不进去；
      *   ② 万一只能落到临时名，就必须**从头重下**（临时文件是空的，续传会缺前面那段），
@@ -408,6 +504,8 @@ class Downloader {
     // 落到临时名 = 从头写，不能续传
     if (start > 0 && !tmp) headers.Range = `bytes=${start}-`;
     const resumeFrom = tmp ? 0 : start;
+    /** 本次是否真的发了 Range —— 只有发过才需要校验响应是不是按区间给的 */
+    const sentRange = start > 0 && !tmp;
 
     const streamPath = tmp || dest;
     const ws = fs.createWriteStream(streamPath, { fd: fh.fd, autoClose: false });
@@ -423,9 +521,47 @@ class Downloader {
 
     let written = resumeFrom;
     let ok = false;
+    /**
+     * 非空 = 本次尝试作废，必须丢弃已写字节从头重下。
+     * 用它而不是直接 return，是因为 finally 里要先把句柄关掉再删文件（Windows 上顺序反了就删不掉）。
+     */
+    let restartReason = '';
 
     try {
       const res = await this.fetchImpl(url, { headers });
+
+      if (sentRange) {
+        /**
+         * ⚠️ 发过 Range 就必须**逐字确认服务端真的按区间回了**（三种状态各有各的处置）：
+         *
+         *   206 + Content-Range 起点 == start  → 真续传，接着写（唯一可以追加的情形）
+         *   200                                → 服务端/代理忽略了 Range，回的是**整份文件**
+         *   416                                → 区间不可满足：本地文件与远端已经不一致
+         *
+         * 早先只判了 `!res.ok && res.status !== 206`，于是 200 被当成续传：
+         * 整份内容被追加到旧前缀后面，得到一个「内容重复」的损坏文件
+         * （能打开、播到一半又从开头开始），而且计为成功 —— 用户根本无从发现。
+         */
+        if (res.status === 200) {
+          await discardBody(res);
+          restartReason = '回 200 而不是 206，服务端忽略了 Range';
+          return { restart: restartReason };
+        }
+        if (res.status === 416) {
+          await discardBody(res);
+          restartReason = '回 416（该区间不被接受，本地文件与远端已不一致）';
+          return { restart: restartReason };
+        }
+        if (res.status === 206) {
+          const crStart = contentRangeStart(res.headers?.get?.('content-range'));
+          if (crStart !== resumeFrom) {
+            await discardBody(res);
+            restartReason = `Content-Range 起点 ${crStart === null ? '缺失' : crStart} 与本地已有 ${resumeFrom} 不一致`;
+            return { restart: restartReason };
+          }
+        }
+      }
+
       if (!res.ok && res.status !== 206) {
         if (res.status === 404 || res.status === 403) {
           throw Object.assign(new Error(`HTTP ${res.status}（资源不可用或已失效）`), { fatal: true });
@@ -470,11 +606,22 @@ class Downloader {
             report();
           }
         } else {
+          /**
+           * 退化分支：响应既没有可读的 body 流，只剩 `arrayBuffer()`。
+           *
+           * 这种情况在真机上少见（Electron 的 ses.fetch 一般都给 WHATWG 流），但一旦
+           * 走到这里就必须**按真实字节数记账**：早先这三行只顾着写盘，既不累加
+           * `stats.bytes` 也不上报进度 —— 表现为界面上「总字节数少了几个文件」
+           * 而进度条全程不动，看起来像卡死。写完补记一次即可，不必再造一条流。
+           */
           const buf = Buffer.from(await res.arrayBuffer());
+          written += buf.length;
+          this.stats.bytes += buf.length;
           await new Promise((resolve, reject) => {
             ws.write(buf, (err) => (err ? reject(err) : resolve()));
           });
           if (wsErr) throw wsErr;
+          report();
         }
         if (wsErr) throw wsErr;
         await new Promise((resolve, reject) => {
@@ -500,6 +647,7 @@ class Downloader {
       ok = true;
       this.stats.done++;
       this.onProgress({ event: 'done', task, size: after.size, stats: this._snapshot() });
+      return 'done';
     } finally {
       /**
        * 句柄一定关。早先「手动 ws.write」那条分支一旦在写入中出错就直接抛出，
@@ -512,7 +660,15 @@ class Downloader {
         /* 忽略 */
       }
       await fh.close().catch(() => {}); // 成功路径上已经关过一次，重复关无害
-      if (tmp) {
+      if (restartReason) {
+        /**
+         * 续传作废：本地那截旧前缀**必须彻底丢掉**，绝不能只靠「下次以 'w' 打开」——
+         * 万一重开失败（只读/被占用），残留的前缀会和新内容拼在一起，
+         * 又回到「内容重复的损坏文件」那个坑。这里先删，下一次尝试用 'w' 打开
+         * 再兜一层（'w' 本身就是截断），两条路任一生效都不会留前缀。
+         */
+        await fsp.unlink(streamPath).catch(() => {});
+      } else if (tmp) {
         if (!ok) await fsp.unlink(tmp).catch(() => {});
       } else if (!ok && resumeFrom === 0 && written === 0) {
         // 一个字节都没写进去：别留下空文件占位（旧行为也是「HTTP 出错就不建文件」）
@@ -552,6 +708,33 @@ function tmpNameFor(dest) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * 解析 `Content-Range: bytes 1024-2047/4096` 的**起点**。
+ * 格式认不出来（或被中间层改写）时返回 null —— 调用方据此判定「无法确认是续传」，
+ * 宁可整份重下，也不要赌一把把内容拼坏。
+ */
+function contentRangeStart(value) {
+  const m = /^\s*bytes\s+(\d+)-/i.exec(String(value || ''));
+  return m ? parseInt(m[1], 10) : null;
+}
+
+/**
+ * 丢掉一个不打算读取的响应体。
+ *
+ * 为了一次性释放连接：判定出「服务端没按 Range 回」之后如果直接把 res 扔掉，
+ * Electron 的 ses.fetch 会一直攥着这个请求，下载结束后进程迟迟不退出。
+ */
+async function discardBody(res) {
+  try {
+    const body = res && res.body;
+    if (!body) return;
+    if (typeof body.cancel === 'function') await body.cancel(); // WHATWG 流
+    else if (typeof body.destroy === 'function') body.destroy(); // Node 流
+  } catch {
+    /* 取消失败不影响主流程 */
+  }
 }
 
 function desktopUA() {

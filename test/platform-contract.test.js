@@ -113,10 +113,11 @@ console.log('\n[url-parse ↔ 注册表 的 id 契约]');
 
 t('parseSingleUrl 可能返回的每个 platform 都能在注册表里找到', () => {
   const samples = [
-    'https://weibo.com/WEIBO_UID_PLACEHOLDER/P0RSAbcde',
-    'https://m.weibo.cn/detail/5012345678901234',
-    'https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER',
-    'https://www.xiaohongshu.com/discovery/item/XHS_NOTE_ID_PLACEHOLDER',
+      // 示例值：非真实博主/作品 id
+      'https://weibo.com/1234567890/P0RSAbcde',
+      'https://m.weibo.cn/detail/5012345678901234',
+      'https://www.xiaohongshu.com/explore/EXAMPLE0000000000000000',
+      'https://www.xiaohongshu.com/discovery/item/EXAMPLE0000000000000000',
     'https://www.douyin.com/video/7300000000000000000',
     'https://www.douyin.com/note/7300000000000000000',
   ];
@@ -134,8 +135,8 @@ t('parseSingleUrl 可能返回的每个 platform 都能在注册表里找到', (
 t('三个平台各自都能被识别到至少一种链接形态', () => {
   const seen = new Set(
     [
-      'https://weibo.com/WEIBO_UID_PLACEHOLDER/P0RSAbcde',
-      'https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER',
+      'https://weibo.com/1234567890/P0RSAbcde',
+      'https://www.xiaohongshu.com/explore/EXAMPLE0000000000000000',
       'https://www.douyin.com/video/7300000000000000000',
     ].map((s) => parseSingleUrl(s).platform)
   );
@@ -146,7 +147,7 @@ t('短链域名归属正确（展开后必须还落在这三家里，否则会�
   assert.ok(isShortLink('https://v.douyin.com/iAbCdEf/'));
   assert.ok(isShortLink('https://xhslink.com/aB3dEf'));
   // 微博没有短链域名，别把普通微博链接误判成待展开的短链
-  assert.ok(!isShortLink('https://weibo.com/WEIBO_UID_PLACEHOLDER/P0RSAbcde'));
+  assert.ok(!isShortLink('https://weibo.com/1234567890/P0RSAbcde'));
   assert.ok(!isShortLink('https://t.cn/abc'));
 });
 

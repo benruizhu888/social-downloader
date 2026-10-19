@@ -54,6 +54,38 @@ t('裁剪后「已省略」提示只有一条，不会越堆越多', () => {
   assert.ok(cuts.length <= 1, `「已省略」提示出现了 ${cuts.length} 条，应最多 1 条`);
 });
 
+/**
+ * 突发写入（burst）也必须裁到上限。
+ *
+ * 这条是真机冒烟测出来的：稳态下每帧只进几十行，一次 flush 裁一批（100）足够；
+ * 但同一帧里涌入 1200 条时（批量任务集中报错就是这种形态），旧实现只删 100 个，
+ * 剩下 1101 个节点**永久留在 DOM 里** —— 之后队列已空，再没有 flush 会来收拾它们。
+ * 只在「分批写入 + 每批 pump」的路径上测，是永远测不到它的。
+ */
+t('一帧内突发写入 1200 条也要裁到上限（不留残余节点）', () => {
+  reset();
+  for (let i = 0; i < 1200; i++) ui().log(`突发日志 ${i}`);
+  h.pumpFrames(); // 只 flush 一次：模拟「一帧涌入一大批」
+  const n = el('log').childElementCount;
+  assert.ok(n <= 401, `一帧内写 1200 条后仍有 ${n} 个节点（上限 400 + 1 条提示）`);
+});
+
+t('突发写入后「已省略」提示仍然只有一条', () => {
+  const cuts = logChildren().filter((c) => hasClass(c, 'log-cut'));
+  assert.ok(cuts.length <= 1, `突发写入后提示条数为 ${cuts.length}，应最多 1 条`);
+});
+
+t('切回「全部」后重建的节点数同样受上限约束（不再渲染 1200 行）', () => {
+  reset();
+  for (let i = 0; i < 1500; i++) ui().log(`重建日志 ${i}`);
+  h.pumpFrames();
+  ui().setLogFilter('err');
+  ui().setLogFilter('all'); // 触发 rerenderLog 整体重建
+  h.pumpFrames();
+  const n = el('log').childElementCount;
+  assert.ok(n <= 401, `重建后仍有 ${n} 个节点（上限 400 + 1 条提示）`);
+});
+
 t('全量数组有上限（LOG_KEEP），且计数与真实条数一致', () => {
   reset();
   write(5600, (i) => `批量日志 ${i}`);

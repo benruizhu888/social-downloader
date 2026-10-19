@@ -33,7 +33,7 @@ async function startTask() {
   // 上一轮可能还停在「运行中」：真实流程靠 phase done 收尾，测试里手动补一下，
   // 否则 onStart 会在 `if (state.running) return;` 那里直接返回，用例变得毫无意义
   if (ui().state.running) h.H({ type: 'phase', phase: 'done', message: '收尾', rootDir: 'D:\\out' });
-  el('inputUid').value = 'https://weibo.com/WEIBO_UID_PLACEHOLDER';
+  el('inputUid').value = 'https://weibo.com/1234567890';
   el('inputDir').value = 'D:\\out';
   el('btnStart').fire('click');
   await tick(60);
@@ -160,7 +160,7 @@ t('粘单个作品链接后，只对博主主页生效的选项被隐藏并有�
     mode: 'single', platform: 'weibo', platformName: '微博', itemId: 'P0RSAbcde',
     shortLink: false, mismatch: false, currentName: '微博',
   });
-  el('inputUid').value = 'https://weibo.com/WEIBO_UID_PLACEHOLDER/P0RSAbcde';
+  el('inputUid').value = 'https://weibo.com/1234567890/P0RSAbcde';
   el('inputUid').fire('input');
   await tick(320);
 
@@ -189,7 +189,7 @@ t('选项只是 hidden，不是删掉 —— 切回主页模式时值还在', as
   assert.ok(before.some((v) => v !== null), '数值选项应还在 DOM 里');
 
   h.setInspect({ mode: 'profile' });
-  el('inputUid').value = 'https://weibo.com/WEIBO_UID_PLACEHOLDER';
+  el('inputUid').value = 'https://weibo.com/1234567890';
   el('inputUid').fire('input');
   await tick(320);
 
@@ -201,7 +201,7 @@ t('选项只是 hidden，不是删掉 —— 切回主页模式时值还在', as
 
 t('切平台会按新平台的 schema 重建选项，并重新套用当前模式的显隐', async () => {
   h.setInspect({ mode: 'single', platform: 'weibo', platformName: '微博', itemId: 'x', mismatch: false, currentName: '微博' });
-  el('inputUid').value = 'https://weibo.com/WEIBO_UID_PLACEHOLDER/P0RSAbcde';
+  el('inputUid').value = 'https://weibo.com/1234567890/P0RSAbcde';
   el('inputUid').fire('input');
   await tick(320);
 
@@ -229,7 +229,7 @@ t('单条模式：提示里给出 {保存目录}\\{平台}_{作品id}\\', async 
     mode: 'single', platform: 'weibo', platformName: '微博', itemId: 'P0RSAbcde',
     shortLink: false, mismatch: false, currentName: '微博',
   });
-  el('inputUid').value = 'https://weibo.com/WEIBO_UID_PLACEHOLDER/P0RSAbcde';
+  el('inputUid').value = 'https://weibo.com/1234567890/P0RSAbcde';
   el('inputUid').fire('input');
   await tick(320);
 

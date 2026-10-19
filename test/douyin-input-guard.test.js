@@ -68,13 +68,21 @@ function kindOf(text) {
 
 /* ---------------------------- ① 链接判定 ---------------------------- */
 
+// 示例值：`aid` 用全零 UUID —— 原值是从真实日志里截的请求标识，仓库里一律不写真值
 const LOG_URL =
-  'https://www.douyin.com/jingxuan/search/%E7%88%B1%E5%BF%83%E4%BB%A3%E7%A0%81?aid=055732a5-fc24-4dc1-9e88-808850d221af&type=general';
+  'https://www.douyin.com/jingxuan/search/%E7%88%B1%E5%BF%83%E4%BB%A3%E7%A0%81?aid=00000000-0000-0000-0000-000000000000&type=general';
 
+/**
+ * 示例值，非真实账号。
+ *
+ * 抖音 sec_uid 的字符集是 `[A-Za-z0-9_-]`（见 url-parse.js 的 `/user/<sec_uid>` 判定），
+ * 所以占位串只能用肉眼可辨的字母串，不能带 `<>` —— 带了就会掉出「主页」分支。
+ */
 const PROFILE_URL =
-  'https://www.douyin.com/user/DOUYIN_SEC_UID_PLACEHOLDER';
+  'https://www.douyin.com/user/MS4wLjABAAAAexampleSecUidPLACEHOLDER00';
 
-const ITEM_ID = '7670006158224573684';
+/** 示例值：19 位纯数字（抖音作品 id 的形状），非真实作品 */
+const ITEM_ID = '1234567890123456789';
 
 (async function main() {
   SECTION('[链接判定]');
@@ -174,7 +182,7 @@ const ITEM_ID = '7670006158224573684';
   await t('别家平台与短链完全不受影响', () => {
     for (const u of [
       'https://weibo.com/1234567890/P0RSTabcde',
-      'https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER',
+      'https://www.xiaohongshu.com/explore/EXAMPLE0000000000000000', // 示例值，非真实笔记
       'https://v.douyin.com/iRNBho6/',
     ]) {
       assert.strictEqual(douyinInputProblem(u), '', u);

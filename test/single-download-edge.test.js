@@ -44,14 +44,14 @@ t('抖音分享文案：链接后紧跟「，复制打开抖音」', () => {
 });
 
 t('小红书分享文案：链接后紧跟「。」', () => {
-  const r = parseSingleUrl('https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER。');
+  const r = parseSingleUrl('https://www.xiaohongshu.com/explore/EXAMPLE0000000000000000。');
   assert.ok(r, '应识别出小红书单作品');
   assert.strictEqual(r.platform, 'xhs');
-  assert.strictEqual(r.itemId, '65f3c2a1b1c2d3e4f5a6b7c8');
+  assert.strictEqual(r.itemId, 'EXAMPLE0000000000000000');
 });
 
 t('微博分享文案：链接后紧跟「【」等中文符号', () => {
-  const r = parseSingleUrl('https://weibo.com/WEIBO_UID_PLACEHOLDER/P0RSAbcde【转发】');
+  const r = parseSingleUrl('https://weibo.com/1234567890/P0RSAbcde【转发】');
   assert.ok(r, '应识别出微博单作品');
   assert.strictEqual(r.platform, 'weibo');
 });
@@ -75,11 +75,13 @@ t('链接后紧跟中文汉字（无任何分隔符）', () => {
 });
 
 t('xsec_token 在尾部带标点时仍要完整保留', () => {
+  // 示例值：AB + 肉眼可辨的占位串（真实令牌是 AB 前缀 + 20 位 base62，这里刻意写成一个词）
+  const TOKEN = 'ABexampleXsecTokenPLACEHOLDER';
   const r = parseSingleUrl(
-    'https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER?xsec_token=XHS_XSEC_TOKEN_PLACEHOLDER&xsec_source=pc，快看'
+    `https://www.xiaohongshu.com/explore/EXAMPLE0000000000000000?xsec_token=${TOKEN}&xsec_source=pc，快看`
   );
   assert.ok(r, '应识别');
-  assert.strictEqual(r.token, 'ABnFZn2xWHrGF5kd1bP5', `token 被污染：${r.token}`);
+  assert.strictEqual(r.token, TOKEN, `token 被污染：${r.token}`);
   assert.ok(r.url.includes('xsec_token='), 'URL 里必须带着 xsec_token（不带会 403）');
 });
 
@@ -135,10 +137,11 @@ console.log('\n[不该被识别成单作品]');
 
 t('博主主页链接一律不识别（宁可不认，也不能把主页当成单个作品）', () => {
   for (const s of [
-    'https://weibo.com/u/WEIBO_UID_PLACEHOLDER',
-    'https://m.weibo.cn/u/WEIBO_UID_PLACEHOLDER',
-    'https://www.xiaohongshu.com/user/profile/XHS_USER_ID_PLACEHOLDER',
-    'https://www.douyin.com/user/DOUYIN_SEC_UID_PLACEHOLDER',
+    'https://weibo.com/u/1234567890',
+    'https://m.weibo.cn/u/1234567890',
+    // 示例值：都是一眼假的主页链接（非真实博主）
+    'https://www.xiaohongshu.com/user/profile/EXAMPLE0000000000000002',
+    'https://www.douyin.com/user/MS4wLjABAAAAexampleSecUidPLACEHOLDER00',
     'https://www.douyin.com/',
   ]) {
     assert.strictEqual(parseSingleUrl(s), null, `不该识别：${s}`);
@@ -147,9 +150,9 @@ t('博主主页链接一律不识别（宁可不认，也不能把主页当成�
 
 t('主页下的子页面（/uid/profile）不识别 —— 它和 /uid/mid 只差一个保留字', () => {
   for (const s of [
-    'https://weibo.com/WEIBO_UID_PLACEHOLDER/profile',
-    'https://weibo.com/WEIBO_UID_PLACEHOLDER/follow',
-    'https://weibo.com/WEIBO_UID_PLACEHOLDER/fans',
+    'https://weibo.com/1234567890/profile',
+    'https://weibo.com/1234567890/follow',
+    'https://weibo.com/1234567890/fans',
   ]) {
     assert.strictEqual(parseSingleUrl(s), null, `不该识别：${s}`);
   }
@@ -179,7 +182,7 @@ t('CRLF + 空行 + 首尾空白 + 噪声行', () => {
     'https://www.douyin.com/video/7300000000000000002，复制打开抖音',
     '这是一行纯噪声',
     'https://www.douyin.com/video/7300000000000000001',
-    'https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER',
+    'https://www.xiaohongshu.com/explore/EXAMPLE0000000000000000',
   ].join('\r\n');
   const r = parseInputList(input);
   assert.strictEqual(r.lines, 5, `非空行数应为 5，实际 ${r.lines}`);
@@ -198,7 +201,7 @@ t('同一作品的不同写法算重复（video 路径 / modal_id 参数）', ()
 });
 
 t('批量里混入「主页链接」时，原因要写成「主页」而不是「不是链接」', () => {
-  const r = parseInputList('https://weibo.com/u/WEIBO_UID_PLACEHOLDER');
+  const r = parseInputList('https://weibo.com/u/1234567890');
   assert.strictEqual(r.targets.length, 0);
   assert.ok(/主页/.test(r.ignored[0].reason), r.ignored[0].reason);
 });
@@ -222,7 +225,7 @@ t('每条被跳过的行都能拿到原始文本，不会被悄悄丢掉', () =>
 console.log('\n[mid 编解码]');
 
 t('id → mid → id 往返一致', () => {
-  for (const id of ['1', '1234567', '12345678', '5000000000000000', 'WEIBO_UID_PLACEHOLDER']) {
+  for (const id of ['1', '1234567', '12345678', '5000000000000000', '1234567890']) {
     const mid = idToMid(id);
     assert.ok(mid, `idToMid(${id}) 不应为空`);
     assert.strictEqual(midToId(mid), id, `往返不一致：${id} → ${mid} → ${midToId(mid)}`);
@@ -255,7 +258,7 @@ t('isShortLink 只认单段短链，不认主页', () => {
   assert.ok(isShortLink('https://v.douyin.com/iAbCdEf/'));
   assert.ok(isShortLink('https://xhslink.com/aB3dEf'));
   assert.ok(!isShortLink('https://www.douyin.com/user/MS4wLjABAAAA'));
-  assert.ok(!isShortLink('https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER'));
+  assert.ok(!isShortLink('https://www.xiaohongshu.com/explore/EXAMPLE0000000000000000'));
 });
 
 /* ------------------------------- 汇总 ------------------------------- */

@@ -23,6 +23,7 @@ const state = {
   logQuery: '',        // 当前关键字（大小写不敏感，命中处高亮）
   logFollow: true,     // 是否自动跟随到最新一行（用户上滚查看时自动关闭）
   failures: [],        // 失败明细：{ name, file, error, at }，进度条只给数字，细节靠它
+  booted: false,       // 启动流程是否走完（启动失败时保持 false，横幅会说明卡在哪一步）
   startedAt: 0,        // 本次任务开始时间戳（0 = 未开始）
   endedAt: 0,          // 任务结束时间戳（用来把「已用」冻结在结束那一刻，而不是一直涨）
   eta: null,           // 预计剩余秒数（样本不足时为 null，界面显示「—」）
@@ -136,6 +137,15 @@ let tickTimer = 0;
  * 超出上限时**成批**裁掉最老的（而不是每加一行删一行，避免频繁重排）。
  */
 const LOG_MAX_LINES = 400;
+/**
+ * 单次裁剪的批量大小。
+ *
+ * 只是「一次删多少个」的粒度，**不是**「一次 flush 最多删多少」——
+ * 后者正是本轮修掉的那个 bug：一帧里涌入 1200 条日志（例如批量任务集中报错）时，
+ * 旧实现只删掉 100 个就把剩下的 1101 个节点永久留在 DOM 里，
+ * 「界面只保留最近 400 条」的承诺是假的，越跑越卡的毛病也就回来了。
+ * 见 trimLogDom 里「裁到真正不超过上限为止」的循环。
+ */
 const LOG_TRIM_BATCH = 100;
 
 /**
@@ -149,7 +159,7 @@ const LOG_KEEP = 5000;
  * 只筛「错误」时通常只有几十行；切回「全部」时给个上限，
  * 避免一次性插入几千个节点把界面卡住。
  */
-const LOG_RENDER_MAX = 1200;
+const LOG_RENDER_MAX = LOG_MAX_LINES;
 
 /* --------------------------- 日志：级别与筛选 --------------------------- */
 
@@ -296,22 +306,32 @@ function flushLog() {
 /**
  * 超过上限时成批裁掉最老的。
  *
- * ⚠️ 上一次插入的「已省略」提示会**挡在队首**：如果只判断 firstElementChild 是不是
- * log-cut 就 break，第一次裁剪之后再也不会真正裁掉任何一行，而每次都会再插入一条新提示 ——
- * 结果是 DOM 节点数与提示条数一起单调增长（实测写 3000 条会留下 2998 个节点 + 98 条提示），
- * 长任务照样越跑越卡。正确做法：先把旧提示摘掉，再裁到上限，最后补一条新提示。
+ * ⚠️ 两处坑，都是实测踩出来的：
+ *
+ *   ① 上一次插入的「已省略」提示会**挡在队首**：如果只判断 firstElementChild 是不是
+ *      log-cut 就 break，第一次裁剪之后再也不会真正裁掉任何一行，而每次都会再插入一条
+ *      新提示 —— DOM 节点数与提示条数一起单调增长（实测写 3000 条留下 2998 个节点 +
+ *      98 条提示），长任务照样越跑越卡。所以必须先摘掉旧提示，再裁，最后补一条新的。
+ *
+ *   ② 早期版本「一次 flush 只裁一批（100 个）」：稳态下够用（每帧只进几十条），
+ *      但一帧里涌入 1200 条时就只会删掉 100 个，剩下 1101 个节点**永久留在 DOM 里**
+ *      —— 之后队列已空、再没有 flush 会来收拾它们。真机冒烟测出来的就是这个。
+ *      所以这里必须循环到「真的不超过上限」为止，LOG_TRIM_BATCH 只作单批粒度。
  */
 function trimLogDom(box) {
-  if (box.childElementCount <= LOG_MAX_LINES + LOG_TRIM_BATCH) return;
+  if (box.childElementCount <= LOG_MAX_LINES) return;
   const head = box.firstElementChild;
   if (head && head.classList.contains('log-cut')) box.removeChild(head);
 
-  let removed = 0;
-  while (removed < LOG_TRIM_BATCH && box.childElementCount > LOG_MAX_LINES) {
-    const node = box.firstElementChild;
-    if (!node) break;
-    box.removeChild(node);
-    removed++;
+  // 循环裁到真正达标：批内逐个 removeChild 仍是最省的做法（DOM 没有区间删除 API），
+  // 而每批之间重新读一次 childElementCount，避免删过头。
+  while (box.childElementCount > LOG_MAX_LINES) {
+    const n = Math.min(LOG_TRIM_BATCH, box.childElementCount - LOG_MAX_LINES);
+    for (let i = 0; i < n; i++) {
+      const node = box.firstElementChild;
+      if (!node) break;
+      box.removeChild(node);
+    }
   }
   // 留一条提示，避免用户以为日志丢了
   const cut = document.createElement('div');
@@ -444,11 +464,23 @@ function exportLogText() {
   return `${head}${body}\n`;
 }
 
+/**
+ * Toast。
+ *
+ * 计时器必须**只留一个**：早先每次调用都新起一个 setTimeout，连点两次时
+ * 第一个计时器到点就把第二条消息一起收掉了 —— 用户看到的是「闪一下就没了」。
+ * 现在每次先清掉上一个，计时从最后一次消息开始算。
+ */
+let toastTimer = 0;
 function toast(msg) {
   const el = $('toast');
   el.textContent = msg;
   el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 2600);
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toastTimer = 0;
+    el.classList.remove('show');
+  }, 2600);
 }
 
 function setPhase(text) {
@@ -629,38 +661,71 @@ function addFailure(ev) {
   });
 }
 
+/**
+ * 已渲染到界面上的失败行数（对应 state.failures 的前缀）。
+ *
+ * 失败往往成批到来（一个链接 404，后面几十个文件每个都失败一次）。
+ * 每条失败都把 60 行列表整个重建一遍，就是 60 × N 次建节点 —— 全是白干的。
+ * 改成**只追加没画过的**，再把窗口外的旧行从队首摘掉；「另有 N 条」那行单独维护。
+ */
+let failRendered = 0;
+
 function renderFailures() {
   const box = $('failBox');
   if (!box) return;
   box.hidden = state.failures.length === 0;
-  if (box.hidden) return;
-
   $('failCount').textContent = state.failures.length;
   const list = $('failList');
-  list.textContent = '';
-  const frag = document.createDocumentFragment();
-  const show = state.failures.slice(-FAIL_SHOW_MAX);
-  for (const f of show) {
-    const row = document.createElement('div');
-    row.className = 'f-row';
-    const name = document.createElement('span');
-    name.className = 'f-name';
-    name.textContent = f.name || f.file || '(未知文件)';
-    name.title = f.file || f.name;
-    const why = document.createElement('span');
-    why.className = 'f-why';
-    why.textContent = f.error;
-    why.title = f.error;
-    row.append(name, why);
-    frag.appendChild(row);
+
+  if (box.hidden) {
+    failRendered = 0;
+    list.textContent = '';
+    return;
   }
-  if (state.failures.length > show.length) {
-    const more = document.createElement('div');
-    more.className = 'f-more';
-    more.textContent = `…… 另有 ${state.failures.length - show.length} 条，点「复制清单」拿到全部 ……`;
-    frag.appendChild(more);
+
+  // 从隐藏变可见（新一轮任务的第一次失败）：先清掉上一轮的残留
+  if (failRendered > state.failures.length) {
+    failRendered = 0;
+    list.textContent = '';
   }
-  list.appendChild(frag);
+
+  const fresh = state.failures.slice(failRendered);
+  if (fresh.length) {
+    const frag = document.createDocumentFragment();
+    for (const f of fresh) {
+      const row = document.createElement('div');
+      row.className = 'f-row';
+      const name = document.createElement('span');
+      name.className = 'f-name';
+      name.textContent = f.name || f.file || '(未知文件)';
+      name.title = f.file || f.name;
+      const why = document.createElement('span');
+      why.className = 'f-why';
+      why.textContent = f.error;
+      why.title = f.error;
+      row.append(name, why);
+      frag.appendChild(row);
+    }
+    list.appendChild(frag);
+    failRendered = state.failures.length;
+  }
+
+  // 展示窗口：超过上限时从队首摘掉旧行（「另有 N 条」始终是最后一个孩子）
+  let more = list.querySelector('.f-more');
+  if (state.failures.length > FAIL_SHOW_MAX) {
+    if (!more) {
+      more = document.createElement('div');
+      more.className = 'f-more';
+      list.appendChild(more);
+    }
+    more.textContent = `…… 另有 ${state.failures.length - FAIL_SHOW_MAX} 条，点「复制清单」拿到全部 ……`;
+  } else if (more) {
+    more.remove();
+    more = null;
+  }
+  while (list.children.length > FAIL_SHOW_MAX + (more ? 1 : 0)) {
+    list.removeChild(list.firstElementChild);
+  }
 }
 
 /** 复制用的失败清单（纯文本，可直接贴进 issue / 聊天窗口） */
@@ -690,7 +755,21 @@ function renderOptions() {
   const box = $('options');
   const vals = platformOptions(state.platform);
   box.innerHTML = '';
+  /**
+   * 勾选项回答「下什么」，数字项回答「抓多少 / 多快」—— 两者在视觉上是两类控件。
+   * 之前它们排在同一列里，用户看到「并发数 4」和「下载图片 ☑」挨在一起，
+   * 很难意识到前者是一个可以改的数字。这里在第一个数字项之前插一行分组标题，
+   * 把两类设置隔开（样式见 style.css 的 .grid-sub）。
+   */
+  let numberGroupAdded = false;
   for (const f of p.optionsSchema || []) {
+    if (f.type === 'number' && !numberGroupAdded) {
+      numberGroupAdded = true;
+      const sub = document.createElement('div');
+      sub.className = 'grid-sub';
+      sub.textContent = '抓取范围与并发';
+      box.appendChild(sub);
+    }
     if (f.type === 'bool') {
       const label = document.createElement('label');
       label.className = 'chk';
@@ -785,9 +864,37 @@ function setLink(el, url, emptyText) {
   }
 }
 
+/** 从完整 URL 里取「看得懂的域名」：去掉 www. 前缀；解析失败返回空串 */
+function siteHostOf(url) {
+  try {
+    return new URL(url).host.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 顶栏登录区的「当前网站」徽章。
+ *
+ * 数据源与右栏「官网」那一行**完全一致**（`p.siteURL`），不新造字段 ——
+ * 两处显示不同的域名，比不显示更糟。完整 URL 放在 title 里、点击即复制，
+ * 这样「域名常在眼前、URL 随手可取」，不必为了一串地址撑宽顶栏。
+ */
+function renderSiteChip() {
+  const p = curMeta();
+  const el = $('authSite');
+  if (!el) return;
+  const url = p.siteURL || '';
+  el.textContent = siteHostOf(url) || p.name;
+  el.dataset.url = url;
+  el.title = url ? `当前网站：${url}\n点击复制` : `当前平台：${p.name}（暂无站点地址）`;
+  el.disabled = !url;
+}
+
 function updateLinks() {
   const p = curMeta();
   const cached = state.auth[state.platform] || {};
+  renderSiteChip();
   setLink('siteUrl', p.siteURL);
   // 优先显示登录窗「当前」地址（登录过程中会跳转），其次上次记录的，最后退回平台声明的登录页
   setLink(
@@ -799,9 +906,18 @@ function updateLinks() {
   const lines = raw.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean);
   setLink(
     'targetUrl',
-    lines.length > 1 ? `${lines[0]}　（等 ${lines.length} 条）` : raw,
-    '（在下面填写后自动显示）'
+    lines.length > 1 ? `${lines[0]}（等 ${lines.length} 条）` : raw,
+    '—'
   );
+  /**
+   * 动作行右侧是一个「二选一」的槽位：有输入 → 目标地址（+ 复制），
+   * 没输入 → 快捷键提示。两者互斥，避免同一行里并排放两份说明。
+   */
+  const hasTarget = lines.length > 0;
+  const inline = $('targetInline');
+  if (inline) inline.hidden = !hasTarget;
+  const hint = $('pasteHint');
+  if (hint) hint.hidden = hasTarget;
   scheduleInspect();
 }
 
@@ -818,6 +934,12 @@ function updateLinks() {
  */
 let inspectTimer = null;
 let lastInspect = { mode: 'profile' };
+/**
+ * 判定序号：`inspectInput` 是一次 IPC 往返，连续输入时可能有两个判定同时在飞，
+ * **先发出的那个可能后回来** —— 不加序号的话，慢的旧结果会覆盖新的，
+ * 界面上「目标作品（多个）」一闪又变回「目标博主」，而开始按钮的禁用态跟着错。
+ */
+let inspectSeq = 0;
 
 function scheduleInspect() {
   clearTimeout(inspectTimer);
@@ -908,6 +1030,10 @@ async function runInspect() {
   const box = $('inputMode');
   const textEl = $('inputModeText');
   const input = $('inputUid').value.trim();
+  const seq = ++inspectSeq;
+
+  /** 期间又触发了一次判定：这次的结果已过期，直接丢掉（否则旧结果覆盖新结果） */
+  const stale = () => seq !== inspectSeq;
 
   const show = (warn, text) => {
     box.hidden = false;
@@ -930,6 +1056,7 @@ async function runInspect() {
   } catch {
     r = null;
   }
+  if (stale()) return;
   if (!r || r.mode === 'empty') r = { mode: 'profile' };
   lastInspect = r;
 
@@ -1026,18 +1153,22 @@ async function copyFrom(el, label) {
 
 async function refreshAuth() {
   const p = curMeta();
+  // 登录态文字同时是「打开 Cookie 弹窗」的按钮；不支持手动 Cookie 的平台
+  // 置 disabled —— 键盘 Tab 会跳过它，也不会让用户点了一个没有反应的东西
+  const authText = $('authText');
+  if (authText) authText.disabled = !p.supportsManualCookie;
   const st = await window.api.authStatus(state.platform);
   state.auth[state.platform] = st;
   if (st.loginWindowURL) state.loginUrls[state.platform] = st.loginWindowURL;
   $('authDot').classList.toggle('on', st.loggedIn);
   if (st.loggedIn) {
-    $('authText').textContent = `已登录${p.name}${st.expire ? `（至 ${st.expire}）` : ''}`;
-    $('authText').title = st.detail || `命中凭证：${st.marks.join('、')}`;
+    authText.textContent = `已登录${p.name}${st.expire ? `（至 ${st.expire}）` : ''}`;
+    authText.title = st.detail || `命中凭证：${st.marks.join('、')}`;
   } else {
     // 明确区分「没有 Cookie」与「只有匿名 Cookie」——后者最容易被误认为已登录
     const weak = st.weakSeen || [];
-    $('authText').textContent = `未登录${p.name} —— 请先登录`;
-    $('authText').title = weak.length
+    authText.textContent = `未登录${p.name} —— 请先登录`;
+    authText.title = weak.length
       ? `${st.detail}\n站点已下发访客标识（${weak.join('、')}），它们匿名访问就会产生，不代表已登录。`
       : st.detail || `判定依据：${st.cookieHint}`;
   }
@@ -1098,7 +1229,22 @@ function collectCurrent() {
     const el = $(`opt_${f.key}`);
     if (!el) continue;
     if (f.type === 'bool') opts[f.key] = el.checked;
-    else if (f.type === 'number') opts[f.key] = parseInt(el.value, 10);
+    else if (f.type === 'number') {
+      /**
+       * 数字框允许被清空（选中后按退格），此刻 value 是 ''，parseInt 得 NaN。
+       * NaN 一路传进主进程后所有比较都返回 false：「最多作品数」会变成
+       * 「一个都不截」或「一个都不下」，取决于写法 —— 而界面上看不出任何异常。
+       * 这里必须钳回 schema 的 [min, max]，空值退回 schema 默认。
+       */
+      const n = parseInt(el.value, 10);
+      const min = Number.isFinite(f.min) ? f.min : 0;
+      const max = Number.isFinite(f.max) ? f.max : 9999;
+      if (Number.isFinite(n)) opts[f.key] = Math.min(max, Math.max(min, n));
+      else {
+        const d = p.defaultOptions?.[f.key];
+        opts[f.key] = Number.isFinite(d) ? Math.min(max, Math.max(min, d)) : min;
+      }
+    }
   }
   return opts;
 }
@@ -1108,6 +1254,24 @@ async function persist() {
   const patch = { platform: state.platform, options: collectCurrent() };
   state.settings = await window.api.setSettings(patch);
   return state.settings;
+}
+
+/**
+ * 选项变更的防抖持久化。
+ *
+ * 早先选项只在「切平台 / 点开始」时才写盘 —— 用户勾掉「下载图片」后直接关软件，
+ * 下次打开勾又回来了，看起来像「设置不生效」。现在变更后 400ms 写一次：
+ * 连续勾选只落一次盘，也不会在勾选的同一帧里等 IPC。
+ */
+let persistTimer = 0;
+function schedulePersist() {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    persistTimer = 0;
+    persist().catch(() => {
+      /* 写失败不打断界面：下一次变更会再试，任务开始前还有一次强制 persist */
+    });
+  }, 400);
 }
 
 /* ------------------------------ 任务 ------------------------------ */
@@ -1143,14 +1307,44 @@ async function onStart() {
   log(`任务开始（${modeLabel()}）：${input.replace(/\s+/g, ' ').slice(0, 120)}`, '', state.platform);
 
   const options = collectCurrent();
-  state.settings = await window.api.setSettings({ platform: state.platform, options });
 
-  const res = await window.api.start({ platform: state.platform, input, outDir, options });
-  if (res?.error) {
-    log(res.error, 'err', state.platform);
-    toast(res.error);
+  try {
+    state.settings = await window.api.setSettings({ platform: state.platform, options });
+
+    const res = await window.api.start({ platform: state.platform, input, outDir, options });
+    if (res?.error) {
+      log(res.error, 'err', state.platform);
+      toast(res.error);
+      endTask();
+      setPhase('已停止');
+      // 失败后必须重画统计：否则「当前文件」会永远停在「准备中…」（P2-A17）
+      renderStats();
+    }
+  } catch (err) {
+    /**
+     * P0-6：`setSettings` / `start` 抛异常时，过去这里什么都不做 ——
+     * `body.running` 一直是 true、主按钮永远停在「下载中…」且不可点、
+     * 停止按钮却是亮的：整个界面看起来像卡死，只能重启软件。
+     * 现在按「任务已失败结束」收尾，并把原因摆到日志和提示条上。
+     */
     endTask();
     setPhase('已停止');
+    log(`任务启动失败：${err.message}`, 'err', state.platform);
+    toast(`任务启动失败：${err.message}`);
+    renderStats();
+  } finally {
+    /**
+     * 无论走哪条路，按钮都要回到与当前状态一致的样子。
+     * （endTask 已经处理过一遍，这里再兜一次是因为 endTask 只在异常/error 分支被调到，
+     *  而「成功启动」这条路上按钮本来就该保持忙碌 —— 所以按 state.running 判断，
+     *  不能在成功路径上错误地解禁。）
+     */
+    if (!state.running) {
+      setBusy($('btnStart'), false);
+      $('btnStart').disabled = state.inputMode === 'batch' && !(lastInspect && lastInspect.count);
+      setBusy($('btnStop'), false);
+      $('btnStop').disabled = true;
+    }
   }
 }
 
@@ -1300,32 +1494,71 @@ function handleEvent(ev) {
 
 /* ------------------------------ 初始化 ------------------------------ */
 
-async function init() {
-  state.info = await window.api.info();
-  state.settings = await window.api.getSettings();
-  state.order = state.info.platforms.map((p) => p.id);
-  for (const p of state.info.platforms) state.platforms[p.id] = p;
+/** 启动步骤的中文名（启动失败横幅里要告诉用户「卡在哪一步」） */
+const BOOT_STEP_TEXT = {
+  api: '加载界面接口',
+  info: '读取应用信息',
+  settings: '读取设置',
+  render: '渲染界面',
+  auth: '检查登录状态',
+  ffmpeg: '检查 ffmpeg',
+  bind: '绑定界面事件',
+};
 
-  const active = state.settings.activePlatform || state.info.defaultPlatform;
-  state.platform = state.platforms[active] ? active : state.order[0];
+/**
+ * 启动失败横幅（P0-5）。
+ *
+ * 为什么必须有它：预加载脚本没注入、或 info/getSettings 的 IPC 挂了时，
+ * 过去 init() 会在第一个 await 处直接 reject —— 界面停在「检查登录状态…」，
+ * 按钮全都在但一个也没绑上，用户看到的是「软件坏了，还不说为什么」，
+ * 而打包后的应用根本没有控制台可以看。
+ * 现在把「卡在哪一步 + 具体原因」写在界面上，并给一个「重试」按钮。
+ */
+function showBootError(step, err) {
+  const reason = (err && err.message) || String(err || '未知错误');
+  const box = $('bootError');
+  const text = $('bootErrorText');
+  if (text) text.textContent = `（卡在「${BOOT_STEP_TEXT[step] || step}」）${reason}`;
+  if (box) box.hidden = false;
+  // 控制台也留一份：开发时能直接看到栈
+  if (typeof console !== 'undefined' && console.error) {
+    console.error(`[界面] 初始化失败（${BOOT_STEP_TEXT[step] || step}）：`, err);
+  }
+}
 
-  renderTabs();
-  applyPlatform(state.platform);
-  await refreshAuth();
-
+/** 检查 ffmpeg 并写状态行；失败只影响这一行，不影响整个界面 */
+async function checkFFmpeg() {
   const ff = await window.api.checkFFmpeg();
   const el = $('ffmpegState');
-  if (ff.ok) {
+  if (!el) return;
+  if (ff && ff.ok) {
     el.textContent = `ffmpeg 已就绪（${ff.version}）`;
     el.className = 'ff ok';
   } else {
     el.textContent = 'ffmpeg 未找到 —— 转 MOV 将不可用（不影响普通下载）';
     el.className = 'ff bad';
   }
+}
 
+/** 横幅上的「重试」：必须最先接上，否则「启动失败」时用户连重试都点不动 */
+function bindBootRetry() {
+  const btn = $('btnBootRetry');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      try {
+        location.reload();
+      } catch {
+        /* 极端情况下（location 不可用）只能靠用户手动重启 */
+      }
+    });
+  }
+}
+
+/** 启动时才需要的那几个按钮（放在这里而不是顶层，是为了让 boot 能兜住它们的异常） */
+function bindBootControls() {
   // 手动 Cookie 只对微博开放
   $('authText').addEventListener('click', () => {
-    if (curMeta().supportsManualCookie) $('cookieModal').classList.add('show');
+    if (curMeta().supportsManualCookie) openCookieModal();
   });
   $('btnFfmpeg').addEventListener('click', async () => {
     const dir = await window.api.chooseDir();
@@ -1334,9 +1567,84 @@ async function init() {
     state.settings = await window.api.setSettings({ ffmpegPath: p });
     toast('已记录 ffmpeg 路径，重启后生效');
   });
-
   attachRipples(document);
-  window.api.onEvent(handleEvent);
+}
+
+/**
+ * 启动流程（顺序是有讲究的，别随手调）。
+ *
+ *   ① 没有 `window.api` 就立刻报错：后面每一行都要用它，先报才有可读的提示；
+ *   ② **先订阅事件，再 await**（P0-5）。早先 `onEvent` 是最后一步才调，
+ *      于是「info 慢一点」的机器上，主进程在这几百毫秒里发出的事件
+ *      （登录态、日志、甚至任务完成）全部丢掉；info 一旦挂起不返回，
+ *      界面不但白屏，还永远收不到任何事件 —— 而且不会报错，看起来就是卡死。
+ *   ③ 之后才是 info / getSettings（这两步失败视为启动失败，进横幅）；
+ *      渲染、登录态检查、ffmpeg 检查各自 try/catch，单个失败不阻断后续 ——
+ *      少一个选项区总比整块界面打不开好。
+ */
+async function boot() {
+  let step = 'api';
+  try {
+    // 先接「重试」：后面任何一步失败时它都得是可点的（见 bindBootRetry 的注释）
+    bindBootRetry();
+
+    if (!window.api || typeof window.api.onEvent !== 'function') {
+      showBootError(
+        step,
+        new Error('预加载脚本未注入（window.api 不存在），请重新安装或联系开发者')
+      );
+      return;
+    }
+
+    // ② 第一件事就是订阅：早于任何 await（见上面注释）
+    window.api.onEvent(handleEvent);
+
+    step = 'info';
+    state.info = await window.api.info();
+    step = 'settings';
+    state.settings = await window.api.getSettings();
+
+    step = 'render';
+    try {
+      state.order = state.info.platforms.map((p) => p.id);
+      for (const p of state.info.platforms) state.platforms[p.id] = p;
+
+      const active = state.settings.activePlatform || state.info.defaultPlatform;
+      state.platform = state.platforms[active] ? active : state.order[0];
+
+      renderTabs();
+      applyPlatform(state.platform);
+    } catch (err) {
+      // 渲染失败不该让整个界面变成一张白板：至少把原因说出来
+      log(`界面渲染失败：${err.message}`, 'err');
+    }
+
+    step = 'auth';
+    try {
+      await refreshAuth();
+    } catch (err) {
+      log(`登录状态检查失败：${err.message}`, 'err');
+    }
+
+    step = 'ffmpeg';
+    try {
+      await checkFFmpeg();
+    } catch (err) {
+      log(`ffmpeg 检查失败：${err.message}`, 'err');
+    }
+
+    step = 'bind';
+    try {
+      bindBootControls();
+    } catch (err) {
+      log(`界面事件绑定失败：${err.message}`, 'err');
+    }
+
+    state.booted = true;
+  } catch (err) {
+    // 走到这里说明 info / settings 就挂了 —— 界面缺了基本数据，后面的渲染都不成立
+    showBootError(step, err);
+  }
 }
 
 /* ----------------------------- 事件绑定 ----------------------------- */
@@ -1375,6 +1683,9 @@ $('btnLogout').addEventListener('click', async () => {
 $('btnCopySite').addEventListener('click', () => copyFrom('siteUrl', '官网链接'));
 $('btnCopyLogin').addEventListener('click', () => copyFrom('loginUrlState', '登录页地址'));
 $('btnCopyTarget').addEventListener('click', () => copyFrom('targetUrl', '博主主页链接'));
+// 顶栏那枚域名徽章本身就是「复制当前网站地址」的入口：
+// 不额外加按钮，是因为顶栏已经没有横向空间再放一个动作。
+$('authSite').addEventListener('click', () => copyFrom('authSite', '当前网站地址'));
 $('btnOpenSite').addEventListener('click', async () => {
   await window.api.openSite(state.platform);
   toast(`已在浏览器中打开${curMeta().name}官网`);
@@ -1382,13 +1693,67 @@ $('btnOpenSite').addEventListener('click', async () => {
 // 输入目标链接时同步显示，方便随时复制
 $('inputUid').addEventListener('input', updateLinks);
 
-$('btnCookieCancel').addEventListener('click', () => $('cookieModal').classList.remove('show'));
+// 选项区是动态重建的，用**委托**监听：重建不必重新绑，也不会漏
+$('options').addEventListener('change', schedulePersist);
+
+/* ----------------------------- Cookie 弹窗 ----------------------------- */
+
+/**
+ * 弹窗的三个出口（右上角 × / 取消 / Esc）必须都汇到同一个 close()：
+ * 只绑「取消」时，键盘用户要么 Tab 过整段说明才够得着退出，要么根本出不去。
+ * close() 还要把焦点还给打开它的元素 —— 否则焦点掉回 body，键盘用户得重 Tab 一遍。
+ */
+let modalReturnFocus = null;
+
+function openCookieModal() {
+  if ($('cookieModal').classList.contains('show')) return;
+  modalReturnFocus = document.activeElement || null;
+  $('cookieModal').classList.add('show');
+  $('cookieText').focus();
+}
+
+function closeCookieModal() {
+  $('cookieModal').classList.remove('show');
+  const back = modalReturnFocus;
+  modalReturnFocus = null;
+  if (back && typeof back.focus === 'function') back.focus();
+}
+
+// Esc 关闭：document 级监听，弹窗没开时第一行就 return，成本可忽略
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('cookieModal').classList.contains('show')) closeCookieModal();
+});
+
+/**
+ * 焦点圈在弹窗内（focus trap）。
+ * 弹窗里只有 textarea + 4 个按钮，正反双向循环足够；隐藏元素（offsetParent 为 null
+ * 或已 disabled）必须排除，否则 Tab 会落到看不见的控件上。
+ */
+$('cookieModal').addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab') return;
+  const items = [...$('cookieModal').querySelectorAll('button, textarea')].filter(
+    (el) => !el.disabled && el.offsetParent !== null
+  );
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+});
+
+$('btnCookieClose').addEventListener('click', closeCookieModal);
+$('btnCookieCancel').addEventListener('click', closeCookieModal);
 $('btnCookieSave').addEventListener('click', async () => {
   const v = $('cookieText').value.trim();
   if (!v) return toast('请粘贴 Cookie 内容');
   try {
     await window.api.setCookie(state.platform, v);
-    $('cookieModal').classList.remove('show');
+    closeCookieModal();
     await refreshAuth();
     toast('Cookie 已保存');
   } catch (err) {
@@ -1439,10 +1804,19 @@ $('logFilter').addEventListener('click', (e) => {
   if (item) setLogFilter(item.dataset.level);
 });
 
-// 关键字边打边筛。重建的节点数有 LOG_RENDER_MAX 上限，不会因为一次长任务卡住
+/**
+ * 关键字边打边筛。重建的节点数有 LOG_RENDER_MAX 上限，不会因为一次长任务卡住。
+ * 仍要 160ms 防抖：每敲一个字符就整表重建一次，长日志（400 行 DOM）下打字会明显掉帧，
+ * 而日志筛选本来就不需要逐字符实时。
+ */
+let searchTimer = 0;
 $('logSearch').addEventListener('input', () => {
-  state.logQuery = $('logSearch').value.trim();
-  rerenderLog();
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    searchTimer = 0;
+    state.logQuery = $('logSearch').value.trim();
+    rerenderLog();
+  }, 160);
 });
 
 $('btnLogFollow').addEventListener('click', () => setLogFollow(!state.logFollow));
@@ -1489,6 +1863,7 @@ window.__ui = {
   renderFailures,
   renderMinis,
   renderInputKinds,
+  applyOptionScope,
   exportLogText,
   failuresText,
   setLogFilter,
@@ -1496,4 +1871,5 @@ window.__ui = {
   rerenderLog,
 };
 
-init();
+// 启动（失败会走 #bootError 横幅，不再静默停在半截界面上）
+boot();

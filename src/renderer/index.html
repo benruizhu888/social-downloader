@@ -9,6 +9,8 @@
      img-src 允许 data:：按钮图标用内联 SVG mask，不额外发请求。
      渲染层只加载本地文件，不解析任何远端内容。 -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
+<!-- tokens.css 必须先加载：style.css 里所有颜色/字号/间距/高度都是 var() 引用 -->
+<link rel="stylesheet" href="tokens.css" />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -32,13 +34,29 @@
     <div class="tabs" id="tabs" aria-label="选择平台"></div>
 
     <div class="auth">
+      <!-- 当前网站：登录区必须先说清「现在操作的是哪个站点」。
+           平台名（微博）与域名（weibo.com）不是一一对应，登录还会跳到 passport 子域，
+           用户常常不知道自己正在把账号登到哪个网站上。域名常驻可见，完整 URL 放 title，
+           点击即复制 —— 需要粘贴到浏览器时不用手动选中。 -->
+      <button type="button" class="site-chip" id="authSite" title="点击复制当前网站地址">—</button>
       <span class="dot" id="authDot" aria-hidden="true"></span>
-      <span id="authText">检查登录状态…</span>
+      <!-- 用 button 而不是 span：它打开的是 Cookie 弹窗，键盘用户必须能 Tab 到它；
+           不支持手动 Cookie 的平台由 app.js 置 disabled（Tab 会自动跳过） -->
+      <button type="button" id="authText">检查登录状态…</button>
       <span class="auth-sep" aria-hidden="true"></span>
       <button class="btn sm" id="btnLogin">登录</button>
       <button class="btn sm ghost" id="btnLogout">退出</button>
     </div>
   </header>
+
+  <!-- ============ 启动失败横幅（P0-5）============
+       默认 hidden，不占任何布局；只有 boot() 真的失败时才显示。
+       role="alert" 让读屏软件在它出现时立刻播报；文案由 app.js 填「卡在哪一步 + 原因」。
+       没有它时，预加载脚本没注入的表现是「界面能开、点全都没反应」—— 用户无从判断。 -->
+  <div class="banner danger" id="bootError" role="alert" hidden>
+    <div class="banner-text"><b>界面初始化失败</b><span id="bootErrorText"></span></div>
+    <button class="btn sm" id="btnBootRetry">重试</button>
+  </div>
 
   <div class="layout">
 
@@ -71,32 +89,46 @@
           <button class="btn xs" id="btnSwitchPlatform" hidden></button>
         </div>
 
+        <!-- 动作行右侧过去是一段永远不变的「Ctrl V」提示，中间大片留白。
+             现在这块位置在「有输入」时显示解析出来的目标地址（从右栏「当前平台」卡移来）：
+             粘完链接，紧挨着「开始下载」就能确认「它到底要下谁」，不用把视线挪到右栏底部。
+             没有输入时退回快捷键提示，两种状态互补、不并存。 -->
         <div class="row row-input">
           <div class="row-actions">
             <button class="btn primary" id="btnStart">开始下载</button>
             <button class="btn ghost" id="btnStop" disabled>停止</button>
           </div>
-          <span class="paste-hint"><kbd>Ctrl</kbd><kbd>V</kbd> 可直接粘贴分享文案</span>
+          <div class="target-slot">
+            <span class="paste-hint" id="pasteHint"><kbd>Ctrl</kbd><kbd>V</kbd> 可直接粘贴分享文案</span>
+            <div class="target-inline" id="targetInline" hidden>
+              <span class="ti-label">目标</span>
+              <code class="ti-url" id="targetUrl">—</code>
+              <button class="btn xs ghost" id="btnCopyTarget" title="复制目标链接">复制</button>
+            </div>
+          </div>
         </div>
 
         <!-- 常驻的「支持哪些输入」说明。
-             功能存在但界面上看不见，等于不存在 —— 单条作品下载过去就是这样被忽略的。 -->
+             功能存在但界面上看不见，等于不存在 —— 单条作品下载过去就是这样被忽略的。
+             现在压成「一行结论 + 一行三枚 chip」：三种输入各自的含义写进标题这一句，
+             chip 里只留标签和该平台的真实示例地址（示例才是用户真正要对照的东西），
+             不再用三张竖排卡片把「下载进度」挤到首屏之外。 -->
         <div class="input-kinds" id="inputKinds">
-          <div class="k-head">支持三种输入，粘贴后自动识别，不需要手动切换模式</div>
+          <div class="k-head">
+            支持三种输入：博主主页下全部作品、单个作品只下载这一条、多个作品一行一条 ——
+            粘贴后自动识别，不需要手动切换模式
+          </div>
           <div class="kind">
             <span class="k-tag">博主主页</span>
-            <span class="k-desc">批量下载该作者的全部作品</span>
             <code class="k-eg" id="egProfile">—</code>
           </div>
           <div class="kind">
             <span class="k-tag">单个作品</span>
-            <span class="k-desc">只下载这一条（原图 / 原视频 / Live 图）</span>
             <code class="k-eg" id="egItem">—</code>
           </div>
           <div class="kind">
             <span class="k-tag">多个作品</span>
-            <span class="k-desc">一行一条，逐个下载</span>
-            <code class="k-eg k-eg-plain">把多条作品链接粘进来即可</code>
+            <code class="k-eg k-eg-plain">把多条链接粘进来</code>
           </div>
         </div>
 
@@ -182,7 +214,8 @@
         </div>
 
         <div class="log-wrap">
-          <div class="log" id="log" role="log" aria-label="运行日志"><div class="log-empty">还没有日志。开始一次下载后，这里会实时输出每一步。</div></div>
+          <!-- tabindex=0：日志区是可滚动容器，纯键盘用户必须能 Tab 进来用方向键翻看 -->
+          <div class="log" id="log" role="log" aria-label="运行日志" tabindex="0"><div class="log-empty">还没有日志。开始一次下载后，这里会实时输出每一步。</div></div>
           <button class="log-new" id="btnLogNew" hidden>↓ 有新日志</button>
         </div>
       </section>
@@ -224,32 +257,36 @@
       <section class="card panel">
         <div class="card-head">
           <div>
-            <h2>当前平台</h2>
-            <p class="card-sub">能力与地址，复制给别的设备用</p>
+            <h2>当前网站</h2>
+            <p class="card-sub">地址在上，能力在下，复制给别的设备用</p>
+          </div>
+        </div>
+
+        <!-- 地址提到卡片最上方：这两行原本埋在卡片底部，一屏看不全时等于没有。
+             「博主主页」那行已移到输入框旁的动作行（那里才是它被用到的位置），
+             这里只保留与输入无关、恒定不变的两个站点地址。
+             每行的动作按钮单独包一层 .link-actions：地址要独占一整行才能完整显示，
+             按钮必须留在第一行右侧，两者不能挤在同一行里（挤在一起时地址只剩 128px）。 -->
+        <div class="links" id="links">
+          <div class="link-row">
+            <span class="link-label">官网</span>
+            <div class="link-actions">
+              <button class="btn xs" id="btnCopySite" title="复制官网链接">复制</button>
+              <button class="btn xs ghost" id="btnOpenSite">打开</button>
+            </div>
+            <code class="link-url" id="siteUrl">—</code>
+          </div>
+          <div class="link-row">
+            <span class="link-label">登录页</span>
+            <div class="link-actions">
+              <button class="btn xs" id="btnCopyLogin" title="复制登录页地址">复制</button>
+            </div>
+            <code class="link-url" id="loginUrlState">—</code>
           </div>
         </div>
 
         <div class="badges" id="platformBadges"></div>
         <p class="hint" id="platformHint"></p>
-
-        <div class="links" id="links">
-          <div class="link-row">
-            <span class="link-label">官网</span>
-            <code class="link-url" id="siteUrl">—</code>
-            <button class="btn xs" id="btnCopySite" title="复制官网链接">复制</button>
-            <button class="btn xs ghost" id="btnOpenSite">打开</button>
-          </div>
-          <div class="link-row">
-            <span class="link-label">登录页</span>
-            <code class="link-url" id="loginUrlState">—</code>
-            <button class="btn xs" id="btnCopyLogin" title="复制登录页地址">复制</button>
-          </div>
-          <div class="link-row">
-            <span class="link-label">博主主页</span>
-            <code class="link-url" id="targetUrl">（在上面填写后自动显示）</code>
-            <button class="btn xs" id="btnCopyTarget" title="复制博主主页链接">复制</button>
-          </div>
-        </div>
       </section>
     </aside>
   </div>
@@ -257,6 +294,8 @@
   <!-- ===================== 手动 Cookie（仅微博） ===================== -->
   <div class="modal" id="cookieModal" role="dialog" aria-modal="true" aria-labelledby="cookieTitle">
     <div class="modal-box">
+      <!-- 右上角关闭：键盘用户不必 Tab 过整段说明才能退出弹窗 -->
+      <button class="modal-close" id="btnCookieClose" type="button" aria-label="关闭"></button>
       <h3 id="cookieTitle">手动粘贴 Cookie（微博）</h3>
       <p class="hint">
         在浏览器已登录微博的页面按 F12 → Network → 任意请求 → 复制 Request Headers 里的整条 Cookie，

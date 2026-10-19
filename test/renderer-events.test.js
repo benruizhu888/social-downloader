@@ -76,17 +76,38 @@ t('点击段的空白处（没有命中任何 seg-item）不应改变筛选', ()
   assert.strictEqual(ui().state.logFilter, 'all');
 });
 
-t('在搜索框输入会实时过滤（走真实 input 事件）', () => {
+t('在搜索框输入会防抖过滤（160ms 内不重建，落定后生效）', async () => {
+  const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   el('logSearch').value = 'a.jpg';
   el('logSearch').fire('input');
+  // 防抖是刻意的：400 行日志 DOM 下逐字符整表重建会掉帧。
+  // 断言「没立即生效」本身也是契约的一部分 —— 改成同步会让这条优化悄悄退化。
+  assert.strictEqual(ui().state.logQuery, '', '防抖窗口内不应立即重建');
+  await tick(220);
   assert.strictEqual(ui().state.logQuery, 'a.jpg');
   assert.strictEqual(logRows().length, 1);
   assert.ok(/a\.jpg/.test(logRows()[0].allText()));
 
   el('logSearch').value = '   ';
   el('logSearch').fire('input');
+  await tick(220);
   assert.strictEqual(ui().state.logQuery, '', '只有空格应视为清空');
   assert.strictEqual(logRows().length, 3);
+});
+
+t('选项变更会防抖持久化（以前只在切平台/点开始时才写盘）', async () => {
+  calls.setSettings.length = 0;
+  const tick = (ms) => new Promise((r) => setTimeout(r, ms));
+  const box = el('options');
+  // 替身的选择器只支持 class/tag，属性选择器不可用 —— 用属性手动筛
+  const chk = box.querySelectorAll('input').find((i) => i.type === 'checkbox');
+  assert.ok(chk, '测试平台至少要有一个布尔选项');
+  chk.checked = !chk.checked;
+  box.fire('change', { target: chk });
+  await tick(500);
+  assert.ok(calls.setSettings.length >= 1, '勾选选项后应自动写盘，不能等用户切平台/点开始');
+  const patch = calls.setSettings[calls.setSettings.length - 1];
+  assert.ok(patch.options, '写入的 patch 里应有 options');
 });
 
 t('「跟随最新」按钮能开关，文案同步', () => {
@@ -156,6 +177,12 @@ t('任务运行中不允许切换平台（避免把半途的任务切到别的�
 
 t('「打开保存目录」把当前保存目录交给主进程', async () => {
   const n = calls.openFolder.length;
+  /**
+   * 必须先解禁再点：`#btnOpen` 在 index.html 里就是 `disabled`（没有保存目录时不该能点），
+   * 而浏览器里 disabled 元素根本不会产生 click、事件也不会冒泡出来。
+   * 早先这条用例能过，是因为脚手架不认 disabled —— 那是替身的漏洞，不是产品行为。
+   */
+  el('btnOpen').disabled = false;
   el('btnOpen').fire('click');
   await tick();
   assert.strictEqual(calls.openFolder.length, n + 1, '打开目录按钮没有接上');

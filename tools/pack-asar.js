@@ -47,6 +47,38 @@ const INCLUDE = ['package.json', 'src', 'node_modules'];
  */
 const UNPACKED = new Map([['node_modules/ffmpeg-static/ffmpeg.exe', 82797568]]);
 
+/**
+ * --ffmpeg-size=N：显式覆盖 ffmpeg.exe 的 header 大小。
+ *
+ * UNPACKED 里的数字来自**原包**。一旦 ffmpeg-static 升级、或换了一个安装目录，
+ * 这个数字就会过期 —— 而 asar 对 unpacked 条目的 size 直接用于 fs.stat，
+ * 差一字节读出来的就是截断/补零的二进制，ffmpeg 会以「文件损坏」的方式失败，
+ * 且打包时毫无征兆。所以允许覆盖，并在能找到参考文件时强制核对（见 main）。
+ */
+for (const a of process.argv.slice(2)) {
+  const m = a.match(/^--ffmpeg-size=(\d+)$/);
+  if (m) UNPACKED.set('node_modules/ffmpeg-static/ffmpeg.exe', Number(m[1]));
+}
+
+/** 找一份真实的 ffmpeg.exe 作参照（找不到返回 null，此时跳过核对） */
+function referenceFfmpegSize() {
+  const rel = ['node_modules', 'ffmpeg-static', 'ffmpeg.exe'].join(path.sep);
+  const candidates = [
+    process.env.SD_FFMPEG_EXE,
+    path.join(path.dirname(OUT), 'app.asar.unpacked', rel),
+    path.join(SRC, '..', 'social-downloader', 'resources', 'app.asar.unpacked', rel),
+  ].filter(Boolean);
+  for (const p of candidates) {
+    try {
+      const st = fs.statSync(p);
+      if (st.isFile()) return st.size;
+    } catch {
+      /* 换下一个候选 */
+    }
+  }
+  return null;
+}
+
 const files = {};
 const blocks = [];
 let offset = 0;
@@ -116,6 +148,18 @@ function main() {
   }
   // 补齐源码目录里不存在的二进制条目（见 ensureUnpackedEntry 的注释）
   for (const [rel, size] of UNPACKED) ensureUnpackedEntry(rel, size);
+
+  // 外置条目的大小必须与磁盘上的真实文件一致（差一字节，ffmpeg 就是「文件损坏」）
+  const ffmpegKey = 'node_modules/ffmpeg-static/ffmpeg.exe';
+  const ref = referenceFfmpegSize();
+  if (ref !== null && ref !== UNPACKED.get(ffmpegKey)) {
+    console.error(
+      `✗ ffmpeg.exe 大小对不上：header 里写的是 ${UNPACKED.get(ffmpegKey)}，` +
+        `实际文件是 ${ref} 字节。\n` +
+        `  用 --ffmpeg-size=${ref} 重新打包，否则运行时读到的会是截断的二进制。`
+    );
+    process.exit(1);
+  }
 
   const json = JSON.stringify({ files });
   const jsonLen = Buffer.byteLength(json, 'utf8');

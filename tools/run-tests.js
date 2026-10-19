@@ -34,23 +34,42 @@ const rows = [];
 let totalPass = 0;
 let totalAll = 0;
 
+/**
+ * 单文件超时（毫秒）。
+ *
+ * 测试是子进程跑的，一个文件里的死循环（while 等 IPC 回来、rAF 没被泵）
+ * 会把整轮 run-tests 挂死 —— 而且因为汇总表还没打印，你连「卡在哪个文件」都看不出来。
+ * 超时按「最慢的现有文件（约 2.8s）再留 4 倍余量」取 15s：够宽裕，又能在可接受的时间内
+ * 把「卡死」变成「明确指出哪个文件卡死」。
+ */
+const PER_FILE_TIMEOUT_MS = 15000;
+
 for (const f of files) {
   const started = Date.now();
-  const r = spawnSync(process.execPath, [path.join(TEST_DIR, f)], { encoding: 'utf8' });
+  const r = spawnSync(process.execPath, [path.join(TEST_DIR, f)], {
+    encoding: 'utf8',
+    timeout: PER_FILE_TIMEOUT_MS,
+  });
   const out = `${r.stdout || ''}${r.stderr || ''}`;
+  // spawnSync 超时后 signal 是 SIGTERM，且 stdout 里不会有汇总行 —— 单独点名，别让它伪装成普通失败
+  const timedOut = r.signal === 'SIGTERM' || r.error?.code === 'ETIMEDOUT';
   const m = out.match(/通过 (\d+) \/ (\d+)/);
-  const pass = m ? Number(m[1]) : 0;
-  const all = m ? Number(m[2]) : 0;
+  const pass = timedOut ? 0 : m ? Number(m[1]) : 0;
+  const all = timedOut ? 1 : m ? Number(m[2]) : 0;
   totalPass += pass;
   totalAll += all;
   rows.push({
     file: f,
     pass,
     all,
-    ok: !!m && pass === all,
+    ok: !timedOut && !!m && pass === all,
     ms: Date.now() - started,
     // 没解析到汇总行 = 脚本本身崩了，把关键几行带出来，省得再跑一次
-    crash: m ? '' : out.split('\n').filter(Boolean).slice(-4).join('\n        '),
+    crash: timedOut
+      ? `超过 ${PER_FILE_TIMEOUT_MS / 1000}s 未结束（多半是死循环或没被泵的 rAF/时钟）`
+      : m
+        ? ''
+        : out.split('\n').filter(Boolean).slice(-4).join('\n        '),
   });
 }
 

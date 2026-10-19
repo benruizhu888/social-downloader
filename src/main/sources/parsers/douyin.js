@@ -2,7 +2,7 @@
  * 抖音作品解析
  * 数据来源：页面自身请求的 /aweme/v1/web/aweme/post 响应（已被注入脚本截获）
  */
-const { normalizeUrl, extFromUrl, deepFindVideo, deepFindImages, unique } = require('./util');
+const { normalizeUrl, extFromUrl, deepFindVideo, deepFindImages, unique, mapItemsSafely, isoOrEmpty } = require('./util');
 
 /**
  * 抖音图集的图片地址带"模板处理"段，形如：
@@ -155,7 +155,12 @@ function awemeToItem(raw) {
   return {
     id,
     title: aw.desc || aw.item_title || '',
-    createdAt: aw.create_time ? new Date(aw.create_time * 1000).toISOString() : '',
+    /**
+     * 发布时间：`create_time` 正常是秒级数字，但脏数据（`'刚刚'`、null、超大数）
+     * 会让 `toISOString()` 抛 RangeError，进而把**整页**作品带崩（P1-5）。
+     * 走 isoOrEmpty：非法就给空串，时间缺失不影响下载。
+     */
+    createdAt: aw.create_time ? isoOrEmpty(new Date(Number(aw.create_time) * 1000)) : '',
     author: aw.author?.nickname || '',
     /**
      * 作者的稳定标识（sec_uid 优先，其次 uid）。
@@ -171,14 +176,27 @@ function awemeToItem(raw) {
   };
 }
 
-function parseDouyinResponse(data) {
+/**
+ * 从截获的响应里提取作品列表（带解析统计）。
+ *
+ * 逐条 try/catch：一条脏数据只丢它自己。早先是 `list.map(awemeToItem).filter(Boolean)`，
+ * 任何一条抛异常都会让整页变成「解析响应失败」，用户看到的是「作品凭空少了一半」。
+ *
+ * @param {object} data
+ * @returns {{items: object[], skipped: number}}
+ */
+function parseDouyinResponseDetailed(data) {
   let list = data?.aweme_list || data?.data?.aweme_list;
   if (!Array.isArray(list)) {
     // 首屏直出 / 接口改版：结构未知时递归找
     list = deepCollectAwemes(data);
   }
-  if (!Array.isArray(list)) return [];
-  return list.map(awemeToItem).filter(Boolean);
+  if (!Array.isArray(list)) return { items: [], skipped: 0 };
+  return mapItemsSafely(list, awemeToItem);
+}
+
+function parseDouyinResponse(data) {
+  return parseDouyinResponseDetailed(data).items;
 }
 
 function hasMore(data) {
@@ -188,6 +206,7 @@ function hasMore(data) {
 
 module.exports = {
   parseDouyinResponse,
+  parseDouyinResponseDetailed,
   awemeToItem,
   hasMore,
   dewatermark,

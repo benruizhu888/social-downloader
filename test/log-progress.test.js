@@ -19,7 +19,27 @@ const DIR = path.join(__dirname, '..', 'src', 'renderer');
 const html = fs.readFileSync(path.join(DIR, 'index.html'), 'utf8');
 const js = fs.readFileSync(path.join(DIR, 'app.js'), 'utf8');
 const css = fs.readFileSync(path.join(DIR, 'style.css'), 'utf8');
-const mainJs = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');
+
+/**
+ * 主进程源码（整棵树拼接）。
+ *
+ * 原来这里只读 main.js —— 那时它有一千多行、什么都在里面。现在它只做装配，
+ * 功能分别在 app/*.js 与 app/ipc/*.js。断言想守的是「主进程要带出这个字段」，
+ * 而不是「这个字段必须写在哪个文件」，所以读整棵树：下次再拆也不必回来改测试。
+ */
+function readSourceTree(dir) {
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => (a.name < b.name ? -1 : 1))
+    .map((e) => {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) return readSourceTree(full);
+      return e.name.endsWith('.js') ? fs.readFileSync(full, 'utf8') : '';
+    })
+    .join('\n');
+}
+
+const mainJs = readSourceTree(path.join(__dirname, '..', 'src', 'main'));
 
 const htmlIds = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
 
@@ -133,7 +153,7 @@ t('「失败 0」这种成功收尾判成 ok，不因为句子里有「失败」
 t('完成/成功类判成 ok，其余为 info', () => {
   assert.strictEqual(api.normalizeLevel('视频已保存到 D:\\out', ''), 'ok');
   assert.strictEqual(api.normalizeLevel('共读取 128 条微博', ''), 'info');
-  assert.strictEqual(api.normalizeLevel('博主 UID：WEIBO_UID_PLACEHOLDER', ''), 'info');
+  assert.strictEqual(api.normalizeLevel('博主 UID：1234567890', ''), 'info'); // 示例值，非真实用户
 });
 
 t('调用方显式给的 kind 优先于关键词推断', () => {

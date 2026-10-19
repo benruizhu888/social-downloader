@@ -53,12 +53,43 @@ function safeName(s, max = 40) {
   );
 }
 
-async function exists(p) {
+/**
+ * 「文件存在且不是空壳」才算已完成。
+ *
+ * 为什么不能只看 exists()：ffmpeg 被 kill / 中途失败时会在目标路径留下
+ * 0 字节（或只有文件头）的 .mov，exists() 一律判真 —— 下一轮就跳过转封装，
+ * Live 图甚至连源视频都不再下载，用户永远拿不到能播的 mov。
+ * 判断「要不要重转」必须看内容，不能只看名字在不在。
+ */
+async function hasContent(p) {
   try {
-    await fsp.access(p);
-    return true;
+    const st = await fsp.stat(p);
+    return st.isFile() && st.size > 0;
   } catch {
     return false;
+  }
+}
+
+/**
+ * 落盘目录必须**真的**在本次任务的根目录之下，否则抛错。
+ *
+ * 目录名里的 id 来自页面/接口，属于不可信输入：过去兜底分支直接 `String(item.id)`，
+ * 一个 `..` 就能让文件写到保存目录的上级去（用户把目录选在桌面时尤其危险）。
+ * safeName 已经挡掉绝大多数脏字符，但这是「错了就没有回头路」的地方，
+ * 再加一道断言兜底 —— 宁可整批中止并说清楚，也不要静默写到别处。
+ *
+ * @param {string} rootDir 已 resolve 的根目录（含结尾分隔符）
+ * @param {string} target  待检查的落盘路径
+ * @param {string} label   出错信息里用它指出是哪个作品
+ */
+function assertInside(rootDir, target, label) {
+  const t = path.resolve(target);
+  // Windows 路径不区分大小写，比较前统一小写，避免盘符大小写不同导致误判
+  const win = process.platform === 'win32';
+  const cmp = win ? t.toLowerCase() : t;
+  const root = win ? rootDir.toLowerCase() : rootDir;
+  if (!cmp.startsWith(root)) {
+    throw new Error(`作品 ${label || '(无 id)'} 的目录越界（${t}），已中止以避免写到保存目录之外`);
   }
 }
 
@@ -245,7 +276,8 @@ class TaskRunner {
       throw new Error(
         '没有识别到可下载的作品链接。每行放一条作品链接，例如：\n' +
           '  https://www.douyin.com/video/7300000000000000000\n' +
-          '  https://www.xiaohongshu.com/explore/XHS_NOTE_ID_PLACEHOLDER\n' +
+          // 示例值：真实使用时会是用户自己的链接，这里只是给个形状，别当成可访问的笔记
+          '  https://www.xiaohongshu.com/explore/EXAMPLE0000000000000000\n' +
           (detail ? `\n被跳过的内容：\n${detail}` : '')
       );
     }
@@ -434,6 +466,8 @@ class TaskRunner {
     // ---- 生成下载任务 ----
     const rootDir = path.join(outDir, `${this.adapter.id}_${rootId || 'unknown'}`);
     await fsp.mkdir(rootDir, { recursive: true });
+    /** 目录逃逸断言的基准（带结尾分隔符，避免 `/a/bc` 误判为 `/a/b` 的子目录） */
+    const rootGuard = path.resolve(rootDir) + path.sep;
 
     // 按目标路径去重：同一路径若入队多次，多个 worker 会并发写同一文件（Windows 上表现为 EPERM）
     const taskMap = new Map();
@@ -448,10 +482,20 @@ class TaskRunner {
 
     for (const item of items) {
       const date = organizeByDate ? dateOf(item.dateHint) : '';
-      const folder =
-        safeName(`${date ? date + '_' : ''}${item.folderTitle ? item.folderTitle + '_' : ''}${item.id}`, 60) ||
-        String(item.id);
+      /**
+       * 目录名：**id 必须放在最前面，而且完整保留**，标题单独截断。
+       *
+       * 早先是 `${date}_${title}_${id}` 再整体 slice(0,60)：标题一长，末尾的 id 就被截掉，
+       * 于是同一天、同文案的两篇作品（转发、同话题短句）共用同一个目录 ——
+       * 目标路径也完全相同，被上面的 taskMap 当成重复任务去重，
+       * 结果**整条作品的媒体一个都没下**，日志里连一条失败都看不见。
+       * 现在标题再长也只影响它自己那一段，id 永远是目录名的前缀。
+       */
+      const safeId = safeName(item.id, 40) || 'unknown';
+      const titlePart = item.folderTitle ? safeName(item.folderTitle, 40) : '';
+      const folder = [safeId, date, titlePart].filter(Boolean).join('_');
       const postDir = path.join(rootDir, folder);
+      assertInside(rootGuard, postDir, String(item.id));
       const stem = item.filePrefix ? `${item.filePrefix}_` : '';
 
       let imgIdx = 0;
@@ -495,7 +539,8 @@ class TaskRunner {
           }
           if (convertToMov) {
             const movDest = path.join(postDir, `${stem}video.mov`);
-            if (!(await exists(movDest))) movJobs.push({ srcDest: dest, movDest });
+            // 0 字节的 mov 是历史遗留的半截文件，必须当成「不存在」重新转
+            if (!(await hasContent(movDest))) movJobs.push({ srcDest: dest, movDest });
           }
         } else if (media.kind === 'livephoto') {
           liveIdx++;
@@ -517,8 +562,12 @@ class TaskRunner {
           if (downloadLive) {
             const srcDest = path.join(postDir, `${lstem}_src.${media.ext || 'mp4'}`);
             const movDest = path.join(postDir, `${lstem}.mov`);
-            // 上次已转出 mov 的话不必再拉源文件，重跑能省掉一大半流量
-            if (!(await exists(movDest))) {
+            /**
+             * 上次已转出 mov 的话不必再拉源文件，重跑能省掉一大半流量。
+             * 但只认**非空**的 mov：转封装失败/被 kill 会留下 0 字节文件，
+             * 那种情况下跳过源视频下载，等于这一条 Live 永远修不好。
+             */
+            if (!(await hasContent(movDest))) {
               // 动态片段也要走候选链：微博把这段地址给成明文 http，CDN 对 http 形态直接 403
               addTask({
                 url: media.url,
@@ -591,7 +640,17 @@ class TaskRunner {
     });
     tasks.forEach((t) => this.downloader.push(t));
     const stats = await this.downloader.run();
-    this.log(`下载完成：新增 ${stats.done}，跳过 ${stats.skipped}，失败 ${stats.failed}`);
+    /**
+     * 停止之后不能再报「下载完成：失败 0」—— 那会让用户以为这一轮全都下好了。
+     * 真正没轮到执行的文件数单独报出来（下载器内部已按 aborted 统计，不计入失败）。
+     */
+    if (stats.aborted) {
+      this.log(
+        `已停止：新增 ${stats.done}，跳过 ${stats.skipped}，失败 ${stats.failed}，未执行 ${stats.aborted}`
+      );
+    } else {
+      this.log(`下载完成：新增 ${stats.done}，跳过 ${stats.skipped}，失败 ${stats.failed}`);
+    }
 
     // ---- Live Photo 转 MOV ----
     if (convertLiveToMov && liveJobs.length && !this.stopped) {
@@ -608,8 +667,9 @@ class TaskRunner {
           if (this.stopped) break;
           const job = liveJobs[i];
 
-          // 幂等：上次已转成功就跳过，重跑不会重复失败
-          if (await exists(job.movDest)) {
+          // 幂等：上次已转成功就跳过，重跑不会重复失败。
+          // 「成功」= 非空文件，0 字节的 mov 一定要重转（见 hasContent 的注释）
+          if (await hasContent(job.movDest)) {
             skipped++;
             this.emit({ type: 'convert-progress', done: i + 1, total: liveJobs.length, ok, failed });
             continue;
@@ -660,12 +720,22 @@ class TaskRunner {
         for (let i = 0; i < movJobs.length; i++) {
           if (this.stopped) break;
           const job = movJobs[i];
-          if (!(await exists(job.srcDest))) {
+          // 源视频为空（下载中断留下的 0 字节）同样算缺失：转也只会得到一个空壳
+          if (!(await hasContent(job.srcDest))) {
             failed++;
+            this.log(`转 MOV 跳过：${path.basename(job.srcDest)} 不存在或为空文件（下载可能中断了）`);
+            // 这一条也要上报进度：少了这次 emit，进度条会停在上一格不动（P2-5）
+            this.emit({ type: 'convert-progress', done: i + 1, total: movJobs.length, ok, failed });
             continue;
           }
           try {
-            await convertToMOV({ input: job.srcDest, output: job.movDest, ffmpegBin: bin });
+            await convertToMOV({
+              input: job.srcDest,
+              output: job.movDest,
+              ffmpegBin: bin,
+              // 与 Live 那条路一致：用户点停止时 ffmpeg 要能被真正杀掉（P1-4）
+              signal: this.ac.signal,
+            });
             ok++;
           } catch (err) {
             failed++;
@@ -687,4 +757,4 @@ function guessExt(url, fallback) {
   return (m ? m[1].toLowerCase() : fallback).replace('jpeg', 'jpg');
 }
 
-module.exports = { TaskRunner, safeName, buildChain, guessExt, dateOf };
+module.exports = { TaskRunner, safeName, buildChain, guessExt, dateOf, assertInside };
