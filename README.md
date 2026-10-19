@@ -60,17 +60,26 @@
 ## 截图
 
 以下截图由 `npm run shots` 生成：启动真实应用、把界面摆成对应状态、跑一遍自检断言（`errors` 必须为空）后截图。
-桌面端窗口 1427×900，窄屏窗口 527×700（高 DPI 下输出 2475×1477 / 900×1127）。
+桌面端输出 2475px 宽、窄屏 900px 宽（窗口 1427×900 与 527×700，1.75 倍缩放）；
+「设置项全展开」那张用了更高的窗口，以便整列设置一屏可见。
 
 **桌面端**
 
-| 首屏 | 下载中 |
+| 首屏（空状态） | 下载中 |
 |---|---|
 | ![](docs/screenshots/desktop-01-idle.png) | ![](docs/screenshots/desktop-02-progress.png) |
 
 | 手动 Cookie 弹窗 | 日志与筛选 |
 |---|---|
 | ![](docs/screenshots/desktop-03-cookie-modal.png) | ![](docs/screenshots/desktop-04-logs.png) |
+
+| 失败明细（错误提示） | 设置项全展开 |
+|---|---|
+| ![](docs/screenshots/desktop-05-failures.png) | ![](docs/screenshots/desktop-06-settings.png) |
+
+失败明细那张里三种失败原因都是真实分支：`HTTP 403`（链接过期）、`ECONNREFUSED`（连接被拒）、
+`ENOSPC`（磁盘空间不足）。统计格「失败 3」与「失败明细 3 项」、日志三条错误行是同一份数据，
+不是摆设。
 
 **窄屏（单栏布局）**
 
@@ -178,7 +187,7 @@ npm run test:list  # 逐个文件串行执行，便于定位
 social-downloader.exe --smoke-out=D:/tmp/smoke.json --smoke-scene=progress --window-size=1440x900
 ```
 
-- `--smoke-scene`：`idle`（干净首屏）/ `progress`（下载中）/ `modal`（Cookie 弹窗）/ `logs`（日志压力），默认 `progress`
+- `--smoke-scene`：`idle`（干净首屏）/ `progress`（下载中）/ `modal`（Cookie 弹窗）/ `logs`（日志压力）/ `failures`（三种失败原因同现），默认 `progress`
 - 断言结果并入 `errors`：`errors` 非空即失败，不需要人肉看 JSON
 - 截图写在 `<smoke-out>.png`，失败只警告不判失败（无 GPU / 远程桌面常见）
 
@@ -188,7 +197,7 @@ social-downloader.exe --smoke-out=D:/tmp/smoke.json --smoke-scene=progress --win
 
 ```bash
 set SD_ELECTRON_EXE=<你的 Electron 或已安装应用的 exe 绝对路径>
-npm run shots              # 八张全部重拍
+npm run shots              # 十张全部重拍
 npm run shots -- 02        # 只重拍名字含 02 的两张
 ```
 

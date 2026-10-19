@@ -72,7 +72,7 @@ function pngPathOf(smokeOut) {
 }
 
 /** 允许的截图场景（顺序即上面文件头的说明顺序） */
-const SMOKE_SCENES = ['idle', 'progress', 'modal', 'logs'];
+const SMOKE_SCENES = ['idle', 'progress', 'modal', 'logs', 'failures'];
 const DEFAULT_SCENE = 'progress';
 
 /**
@@ -270,6 +270,54 @@ function attachSmoke(ctx) {
           const toastEl = document.getElementById('toast');
           for (let i = 0; i < 25 && toastEl && toastEl.classList.contains('show'); i++) await sleep(200);
           return { scene: SCENE, hasApi: typeof window.api, viewport, snap, logs, checks };
+        }
+
+        /**
+         * 失败明细场景：一次任务里同时出现多种失败原因（403 / 连接被拒 / 磁盘满 / 登录态过期），
+         * 让「失败明细」这一块真正立起来 —— 进度条只给「失败 N」，出了事必须能落到具体文件。
+         */
+        if (SCENE === 'failures') {
+          const ui = window.__ui;
+          /** fail 必须从 0 起：handleEvent 的 fail 分支会自己 state.stats.fail++，
+           *  预先写 3 的话跑完会变成 6，统计格与「失败明细 3 项」自相矛盾。 */
+          ui.state.stats = { total: 12, done: 8, skip: 1, fail: 0, item: 5 };
+          ui.state.inflight.clear();
+          ui.renderStats();
+          await frames();
+
+          const stat = (done, skipped, failed) => ({ done, skipped, failed, bytes: 2048 * (done + failed), remaining: 0 });
+          ui.handleEvent({ type: 'dl', event: 'progress', file: 'D:\\\\out\\\\weibo_EXAMPLE\\\\01\\\\img07.jpg',
+            written: 40, total: 100, stats: stat(8, 1, 0) });
+          await frames();
+          ui.handleEvent({ type: 'dl', event: 'fail', file: 'D:\\\\out\\\\weibo_EXAMPLE\\\\01\\\\img07.jpg',
+            error: 'HTTP 403 Forbidden（链接已过期）', stats: stat(8, 1, 1) });
+          ui.handleEvent({ type: 'dl', event: 'fail', file: 'D:\\\\out\\\\weibo_EXAMPLE\\\\01\\\\vid03.mp4',
+            error: '连接被拒绝（ECONNREFUSED）', stats: stat(8, 1, 2) });
+          ui.handleEvent({ type: 'dl', event: 'fail', file: 'D:\\\\out\\\\weibo_EXAMPLE\\\\01\\\\img09.jpg',
+            error: '写入失败：磁盘空间不足（ENOSPC）', stats: stat(8, 1, 3) });
+          await frames(3);
+
+          const failBox = document.getElementById('failBox');
+          const failRows = document.querySelectorAll('#failList .f-row').length;
+          const failCount = document.getElementById('failCount').textContent;
+          const failButtons = ['btnCopyFail', 'btnClearFail'].filter((id) => !!document.getElementById(id)).length;
+
+          // 把失败明细滚到视口中间：它默认在进度卡最底部，900 高的窗口里看不到
+          if (failBox && failBox.scrollIntoView) failBox.scrollIntoView({ block: 'center' });
+          await frames(3);
+
+          check('失败明细区出现了', !failBox.hidden, !failBox.hidden);
+          check('三条失败逐条列出', failRows === 3, failRows);
+          check('标题里的失败数与统计一致', failCount === '3', failCount);
+          check('复制清单 / 清除 两个动作都在', failButtons === 2, failButtons);
+          return {
+            scene: SCENE,
+            hasApi: typeof window.api,
+            viewport,
+            snap,
+            failures: { failRows, failCount, failButtons, stats: { ...ui.state.stats } },
+            checks,
+          };
         }
 
         /* ---------- 2. 设计令牌是否真的生效 ----------

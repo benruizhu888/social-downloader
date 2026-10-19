@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 生成 README 用的界面截图（桌面端 + 窄屏各四个场景，共八张）。
+ * 生成 README 用的界面截图（桌面端六个场景 + 窄屏四个场景，共十张）。
  *
  * 为什么单独写一个编排脚本，而不是手写八条命令：
  *   ① 每张图要一套 `--window-size` + `--smoke-scene` + 各自的 `--user-data-dir`，
@@ -20,7 +20,7 @@
  *
  * 用法：
  *   set SD_ELECTRON_EXE=<你的 Electron 可执行文件路径>
- *   node tools/screenshots.js                    # 全部八张
+ *   node tools/screenshots.js                    # 全部十张
  *   node tools/screenshots.js 02                 # 只跑名字含 02 的那张（调试用）
  *
  * 产物（docs/screenshots/）：
@@ -28,6 +28,8 @@
  *   desktop-02-progress.png      下载进行中
  *   desktop-03-cookie-modal.png  手动 Cookie 弹窗
  *   desktop-04-logs.png          日志区（级别筛选 + 关键字检索）
+ *   desktop-05-failures.png      失败明细（多种失败原因逐条落到文件）
+ *   desktop-06-settings.png      设置项全展开（更高的窗口，右栏无需内滚）
  *   mobile-01-idle.png           窄屏首屏（单栏）
  *   mobile-02-progress.png       窄屏下载中
  *   mobile-03-cookie-modal.png   窄屏弹窗
@@ -59,6 +61,8 @@ const SHOTS = [
   { name: 'desktop-02-progress', scene: 'progress', size: DESKTOP, desc: '下载进行中（进度条 + 并发细条 + 失败明细）' },
   { name: 'desktop-03-cookie-modal', scene: 'modal', size: DESKTOP, desc: '手动 Cookie 弹窗（微博）' },
   { name: 'desktop-04-logs', scene: 'logs', size: DESKTOP, desc: '日志区（级别筛选 + 关键字检索）' },
+  { name: 'desktop-05-failures', scene: 'failures', size: DESKTOP, desc: '失败明细（403 / 连接被拒 / 磁盘满，逐条落到文件）' },
+  { name: 'desktop-06-settings', scene: 'idle', size: '1427x1240', desc: '设置项全展开（右栏 11 项 + ffmpeg + 站点地址，无需内滚）' },
   { name: 'mobile-01-idle', scene: 'idle', size: MOBILE, desc: '窄屏首屏（单栏布局）' },
   { name: 'mobile-02-progress', scene: 'progress', size: MOBILE, desc: '窄屏下载中' },
   { name: 'mobile-03-cookie-modal', scene: 'modal', size: MOBILE, desc: '窄屏弹窗' },
